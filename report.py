@@ -69,21 +69,30 @@ class _PDF(FPDF):
         self.set_font("Helvetica", "", 6.5)
         self.set_text_color(*_MUTED)
         self.set_xy(x + 3, y + 2.5)
-        self.cell(w - 6, 4, label.upper())
+        self.cell(w - 6, 4, _s(label).upper())
         self.set_font("Helvetica", "B", 13)
         self.set_text_color(*vc)
         self.set_xy(x + 3, y + 7)
-        self.cell(w - 6, 9, str(value))
+        self.cell(w - 6, 9, _s(value))
 
     def kv(self, label, value, indent=10):
         self.set_font("Helvetica", "", 8)
         self.set_text_color(*_MUTED)
         self.set_x(indent)
-        self.cell(55, 5, label)
+        self.cell(55, 5, _s(label))
         self.set_font("Helvetica", "B", 8)
         self.set_text_color(*_TEXT)
-        self.cell(0, 5, str(value))
+        self.cell(0, 5, _s(value))
         self.ln(5)
+
+
+def _s(text: str) -> str:
+    """Remove/substitui caracteres fora do latin-1 para compatibilidade com Helvetica."""
+    return (str(text)
+            .replace("—", "-").replace("–", "-")  # em/en dash
+            .replace("’", "'").replace("‘", "'")
+            .replace("“", '"').replace("”", '"')
+            .encode("latin-1", errors="replace").decode("latin-1"))
 
 
 def _tmp_jpg(img_bgr, quality=88):
@@ -121,7 +130,7 @@ def generate_report(
     # ── cabeçalho do evento ──────────────────────────────────────────────────
     pdf.set_font("Helvetica", "B", 16)
     pdf.set_text_color(*_TEXT)
-    pdf.cell(0, 8, event_name, align="C")
+    pdf.cell(0, 8, _s(event_name), align="C")
     pdf.ln(5)
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(*_MUTED)
@@ -197,7 +206,7 @@ def generate_report(
     pdf.ln(5)
     pdf.kv("Método primário",  "Jacobs (área × densidade)",    col1_x)
     pdf.kv("Método secundário","CSRNet (density map)",         col1_x)
-    pdf.kv("Classificação",    f"{density_class} — {density_desc}", col1_x)
+    pdf.kv("Classificacao",    f"{density_class} - {density_desc}", col1_x)
     pdf.kv("Fator aplicado",   f"{density_factor} pessoas/m²", col1_x)
 
     # coluna 2: câmera
@@ -246,7 +255,7 @@ def generate_report(
             for s in row_sectors:
                 sx = 10 + s["col"] * (sw + 3)
                 pdf.metric(sx, sy, sw, 20,
-                           f"Zona {s['row']+1},{s['col']+1} · {s['density_class']}",
+                           _s(f"Zona {s['row']+1},{s['col']+1} - {s['density_class']}"),
                            f"{s['jacobs_count']:,}")
             pdf.ln(24)
 
