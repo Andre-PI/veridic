@@ -1,4 +1,3 @@
-import io
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -7,99 +6,94 @@ import cv2
 import numpy as np
 from fpdf import FPDF
 
-_BG       = (8,  14,  26)
-_PANEL    = (12, 20,  36)
-_ACCENT   = (0,  210, 150)
-_BLUE     = (35, 135, 255)
-_TEXT     = (245, 248, 255)
-_MUTED    = (100, 130, 170)
-_BORDER   = (40,  60,  100)
+_NAVY   = (15,  40,  80)
+_BLUE   = (30,  90, 180)
+_GRAY   = (80,  90, 100)
+_LGRAY  = (200, 205, 210)
+_BLACK  = (20,  20,  25)
+_WHITE  = (255, 255, 255)
+_TEAL   = (0,  130, 100)
 
 
-class _PDF(FPDF):
-    def set_dark(self):
-        self.set_fill_color(*_BG)
-        self.rect(0, 0, 210, 297, "F")
-
-    def header(self):
-        self.set_fill_color(*_BG)
-        self.rect(0, 0, 210, 297, "F")
-        # barra topo
-        self.set_fill_color(*_PANEL)
-        self.rect(0, 0, 210, 18, "F")
-        self.set_fill_color(*_ACCENT)
-        self.rect(0, 18, 210, 1.2, "F")
-        self.set_font("Helvetica", "B", 14)
-        self.set_text_color(*_TEXT)
-        self.set_xy(10, 4)
-        self.cell(100, 10, "VERIDIC")
-        self.set_font("Helvetica", "", 9)
-        self.set_text_color(*_MUTED)
-        self.set_xy(110, 6)
-        self.cell(90, 6, "Estimativa de Público em Eventos", align="R")
-        self.ln(22)
-
-    def footer(self):
-        self.set_y(-12)
-        self.set_font("Helvetica", "I", 7)
-        self.set_text_color(*_MUTED)
-        self.set_fill_color(*_PANEL)
-        self.rect(0, 284, 210, 13, "F")
-        self.set_xy(10, 286)
-        self.cell(130, 6, "A estimativa não substitui catraca, ingresso ou sistema oficial de controle de acesso.")
-        self.set_xy(140, 286)
-        self.cell(60, 6, f"Página {self.page_no()}", align="R")
-
-    def section_title(self, text):
-        self.set_font("Helvetica", "B", 8)
-        self.set_text_color(*_ACCENT)
-        self.cell(0, 5, text.upper())
-        self.ln(1)
-        self.set_fill_color(*_BORDER)
-        self.rect(10, self.get_y(), 190, 0.4, "F")
-        self.ln(4)
-
-    def metric(self, x, y, w, h, label, value, value_color=None):
-        vc = value_color or _TEXT
-        self.set_fill_color(*_PANEL)
-        self.set_draw_color(*_BORDER)
-        self.rect(x, y, w, h, "FD")
-        self.set_fill_color(*_ACCENT)
-        self.rect(x, y, w, 1, "F")
-        self.set_font("Helvetica", "", 6.5)
-        self.set_text_color(*_MUTED)
-        self.set_xy(x + 3, y + 2.5)
-        self.cell(w - 6, 4, _s(label).upper())
-        self.set_font("Helvetica", "B", 13)
-        self.set_text_color(*vc)
-        self.set_xy(x + 3, y + 7)
-        self.cell(w - 6, 9, _s(value))
-
-    def kv(self, label, value, indent=10):
-        self.set_font("Helvetica", "", 8)
-        self.set_text_color(*_MUTED)
-        self.set_x(indent)
-        self.cell(55, 5, _s(label))
-        self.set_font("Helvetica", "B", 8)
-        self.set_text_color(*_TEXT)
-        self.cell(0, 5, _s(value))
-        self.ln(5)
-
-
-def _s(text: str) -> str:
-    """Remove/substitui caracteres fora do latin-1 para compatibilidade com Helvetica."""
-    return (str(text)
-            .replace("—", "-").replace("–", "-")  # em/en dash
+def _s(v) -> str:
+    return (str(v)
+            .replace("—", "-").replace("–", "-")
             .replace("’", "'").replace("‘", "'")
             .replace("“", '"').replace("”", '"')
+            .replace("²", "2").replace("°", "deg")
             .encode("latin-1", errors="replace").decode("latin-1"))
 
 
-def _tmp_jpg(img_bgr, quality=88):
+def _tmp_jpg(img_bgr, quality=90):
     t = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
     cv2.imwrite(t.name, img_bgr, [cv2.IMWRITE_JPEG_QUALITY, quality])
     t.close()
     return t.name
+
+
+class _Report(FPDF):
+    def __init__(self, event_name, generated_at):
+        super().__init__(orientation="P", unit="mm", format="A4")
+        self._event  = _s(event_name)
+        self._gendt  = generated_at
+        self.set_margins(20, 28, 20)
+        self.set_auto_page_break(auto=False)
+
+    def header(self):
+        # linha azul topo
+        self.set_fill_color(*_NAVY)
+        self.rect(0, 0, 210, 8, "F")
+        # título
+        self.set_xy(20, 10)
+        self.set_font("Helvetica", "B", 13)
+        self.set_text_color(*_NAVY)
+        self.cell(120, 7, "RELATORIO DE ESTIMATIVA DE PUBLICO")
+        # data alinhada à direita
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(*_GRAY)
+        self.set_xy(20, 18)
+        self.cell(170, 5, self._gendt, align="R")
+        # linha separadora
+        self.set_draw_color(*_LGRAY)
+        self.line(20, 24, 190, 24)
+        self.set_xy(20, 26)
+
+    def footer(self):
+        self.set_draw_color(*_LGRAY)
+        self.line(20, 285, 190, 285)
+        self.set_font("Helvetica", "I", 7)
+        self.set_text_color(*_GRAY)
+        self.set_xy(20, 287)
+        self.cell(
+            170, 5,
+            "Este documento e uma estimativa tecnica. Os resultados nao substituem "
+            "sistemas oficiais de controle de acesso (catracas, ingressos).",
+            align="C",
+        )
+
+    def section(self, title):
+        self.set_font("Helvetica", "B", 8)
+        self.set_text_color(*_BLUE)
+        self.set_fill_color(235, 242, 255)
+        self.set_x(20)
+        self.cell(170, 6, _s(title).upper(), fill=True)
+        self.ln(7)
+
+    def row(self, label, value, bold_value=False, color=None):
+        self.set_x(22)
+        self.set_font("Helvetica", "", 8)
+        self.set_text_color(*_GRAY)
+        self.cell(60, 5, _s(label))
+        self.set_font("Helvetica", "B" if bold_value else "", 8)
+        self.set_text_color(*(color or _BLACK))
+        self.cell(0, 5, _s(value))
+        self.ln(5)
+
+    def divider(self):
+        self.set_draw_color(*_LGRAY)
+        self.ln(2)
+        self.line(20, self.get_y(), 190, self.get_y())
+        self.ln(4)
 
 
 def generate_report(
@@ -122,142 +116,118 @@ def generate_report(
     timeline: list | None = None,
 ) -> bytes:
 
-    pdf = _PDF(orientation="P", unit="mm", format="A4")
-    pdf.set_auto_page_break(auto=True, margin=16)
-    pdf.set_margins(10, 10, 10)
+    now = datetime.now().strftime("%d/%m/%Y  %H:%M")
+    pdf = _Report(event_name, now)
     pdf.add_page()
 
-    # ── cabeçalho do evento ──────────────────────────────────────────────────
-    pdf.set_font("Helvetica", "B", 16)
-    pdf.set_text_color(*_TEXT)
-    pdf.cell(0, 8, _s(event_name), align="C")
-    pdf.ln(5)
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_text_color(*_MUTED)
-    pdf.cell(0, 5, datetime.now().strftime("Gerado em %d/%m/%Y às %H:%M"), align="C")
-    pdf.ln(10)
+    # ── identificação ────────────────────────────────────────────────────────
+    pdf.section("Identificacao do Evento")
+    pdf.row("Evento", event_name, bold_value=True)
+    pdf.row("Data / Hora", now)
+    pdf.row("Tipo de midia", "Video" if is_video else "Imagem estatica")
+    pdf.divider()
 
-    # ── métricas principais ──────────────────────────────────────────────────
-    pdf.section_title("Resultado")
+    # ── resultados ───────────────────────────────────────────────────────────
+    pdf.section("Resultados")
 
-    bw, bh, gap = 45, 22, 3
-    by = pdf.get_y()
+    csrnet_val = f"{peak_count:,}" if is_video and peak_count else f"{csrnet_count:,}"
+    csrnet_lbl = "Estimativa de pico (CSRNet)" if is_video else "Estimativa (CSRNet)"
 
-    csrnet_label = "Pico · CSRNet" if is_video else "Estimativa · CSRNet"
-    csrnet_val   = f"{peak_count:,}" if is_video and peak_count else f"{csrnet_count:,}"
+    pdf.row(csrnet_lbl,     csrnet_val,              bold_value=True)
+    pdf.row("Estimativa (Jacobs)", f"{jacobs_count:,}",   bold_value=True, color=_TEAL)
+    if is_video and avg_count:
+        pdf.row("Media durante evento (CSRNet)", f"{avg_count:,}")
+    pdf.row("Concordancia entre metodos", agreement_pct, bold_value=True)
+    pdf.divider()
 
-    pdf.metric(10,            by, bw, bh, csrnet_label,        csrnet_val)
-    pdf.metric(10+bw+gap,     by, bw, bh, "Estimativa · Jacobs", f"{jacobs_count:,}", _ACCENT)
-    pdf.metric(10+2*(bw+gap), by, bw, bh, "Área detectada",    f"{crowd_area_m2:,.0f} m²")
-    pdf.metric(10+3*(bw+gap), by, bw, bh, "Concordância",      agreement_pct,
-               _ACCENT if agreement_pct not in ("—", "0%") else (255, 80, 80))
+    # ── metodologia ──────────────────────────────────────────────────────────
+    pdf.section("Metodologia")
+    pdf.row("Metodo primario",   "Jacobs - area x fator de densidade")
+    pdf.row("Metodo secundario", "CSRNet - mapa de densidade neural")
+    pdf.row("Area detectada",    f"{crowd_area_m2:,.0f} m2")
+    pdf.row("Classificacao",     f"{_s(density_class)} ({density_factor} p/m2) - {_s(density_desc)}")
+    pdf.row("Altitude do drone", f"{camera_altitude} m")
+    pdf.row("FOV horizontal",    f"{camera_fov} graus  (DJI Mini 4 Pro)")
+    pdf.divider()
 
-    pdf.ln(bh + 5)
+    # ── setores ──────────────────────────────────────────────────────────────
+    if sectors and len(sectors) > 1:
+        pdf.section("Analise por Setor")
+        # cabeçalho da tabela
+        pdf.set_x(22)
+        pdf.set_font("Helvetica", "B", 7.5)
+        pdf.set_text_color(*_GRAY)
+        pdf.cell(25, 5, "Zona")
+        pdf.cell(40, 5, "Classificacao")
+        pdf.cell(30, 5, "Fator (p/m2)")
+        pdf.cell(35, 5, "Estimativa Jacobs")
+        pdf.cell(30, 5, "Estimativa CSRNet")
+        pdf.ln(5)
+        pdf.set_draw_color(*_LGRAY)
+        pdf.line(22, pdf.get_y(), 188, pdf.get_y())
+        pdf.ln(1)
 
-    if is_video and avg_count is not None:
-        by2 = pdf.get_y()
-        pdf.metric(10,        by2, bw, 18, "Média · CSRNet",  f"{avg_count:,}")
-        pdf.metric(10+bw+gap, by2, bw, 18, "Densidade",       f"{density_class}  {density_factor} p/m²")
-        pdf.ln(22)
-    else:
-        by2 = pdf.get_y()
-        pdf.metric(10, by2, bw, 18, "Densidade", f"{density_class}  {density_factor} p/m²")
-        pdf.ln(22)
+        for s in sorted(sectors, key=lambda x: (x["row"], x["col"])):
+            pdf.set_x(22)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.set_text_color(*_BLACK)
+            pdf.cell(25, 5, f"Zona {s['row']+1},{s['col']+1}")
+            pdf.cell(40, 5, _s(s["density_class"]))
+            pdf.cell(30, 5, str(s["density_factor"]))
+            pdf.set_font("Helvetica", "B", 8)
+            pdf.set_text_color(*_TEAL)
+            pdf.cell(35, 5, f"{s['jacobs_count']:,}")
+            pdf.set_text_color(*_BLACK)
+            pdf.set_font("Helvetica", "", 8)
+            pdf.cell(30, 5, f"{s['csrnet_count']:,}")
+            pdf.ln(5)
+
+        pdf.divider()
 
     # ── imagens ──────────────────────────────────────────────────────────────
-    pdf.section_title("Evidência Visual")
+    pdf.section("Evidencia Visual")
 
     ann_path  = _tmp_jpg(annotated_bgr)
     heat_path = _tmp_jpg(heatmap_bgr)
 
-    img_w = 92
-    img_h = int(img_w * annotated_bgr.shape[0] / annotated_bgr.shape[1])
+    remaining = 285 - pdf.get_y() - 10
+    img_h = min(remaining, 58)
+    img_w = int(img_h * annotated_bgr.shape[1] / annotated_bgr.shape[0])
+    if img_w > 82:
+        img_w = 82
+        img_h = int(img_w * annotated_bgr.shape[0] / annotated_bgr.shape[1])
+
     iy = pdf.get_y()
 
-    # labels acima das imagens
+    # labels
     pdf.set_font("Helvetica", "B", 7)
-    pdf.set_text_color(*_MUTED)
-    pdf.set_xy(10, iy)
-    pdf.cell(img_w, 5, "SNAPSHOT ANOTADO", align="C")
-    pdf.set_xy(10 + img_w + 6, iy)
-    pdf.cell(img_w, 5, "MAPA DE CALOR (DENSIDADE)", align="C")
-    pdf.ln(5)
+    pdf.set_text_color(*_GRAY)
+    pdf.set_x(20)
+    pdf.cell(img_w, 4, "Frame anotado (CSRNet)", align="C")
+    pdf.set_x(20 + img_w + 8)
+    pdf.cell(img_w, 4, "Mapa de calor (densidade)", align="C")
+    pdf.ln(4)
 
     iy2 = pdf.get_y()
-    # borda / fundo das imagens
-    pdf.set_fill_color(*_PANEL)
-    pdf.set_draw_color(*_BORDER)
-    pdf.rect(10,           iy2, img_w, img_h, "FD")
-    pdf.rect(10+img_w+6,   iy2, img_w, img_h, "FD")
-    pdf.image(ann_path,  10,           iy2, img_w, img_h)
-    pdf.image(heat_path, 10+img_w+6,   iy2, img_w, img_h)
-    pdf.ln(img_h + 8)
+    pdf.set_draw_color(*_LGRAY)
+    pdf.rect(20,          iy2, img_w, img_h)
+    pdf.rect(20+img_w+8,  iy2, img_w, img_h)
+    pdf.image(ann_path,  20,         iy2, img_w, img_h)
+    pdf.image(heat_path, 20+img_w+8, iy2, img_w, img_h)
 
-    # ── relatório técnico ────────────────────────────────────────────────────
-    pdf.section_title("Relatório Técnico")
-
-    col1_x, col2_x = 10, 108
-
-    # coluna 1: metodologia
-    pdf.set_font("Helvetica", "B", 7.5)
-    pdf.set_text_color(*_ACCENT)
-    pdf.set_x(col1_x)
-    pdf.cell(90, 5, "Metodologia")
-    pdf.ln(5)
-    pdf.kv("Método primário",  "Jacobs (área × densidade)",    col1_x)
-    pdf.kv("Método secundário","CSRNet (density map)",         col1_x)
-    pdf.kv("Classificacao",    f"{density_class} - {density_desc}", col1_x)
-    pdf.kv("Fator aplicado",   f"{density_factor} pessoas/m²", col1_x)
-
-    # coluna 2: câmera
-    cur_y = pdf.get_y()
-    pdf.set_xy(col2_x, cur_y - 20)
-    pdf.set_font("Helvetica", "B", 7.5)
-    pdf.set_text_color(*_ACCENT)
-    pdf.cell(90, 5, "Parâmetros da Câmera")
-    pdf.ln(5)
-    pdf.set_xy(col2_x, pdf.get_y())
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_text_color(*_MUTED)
-    pdf.cell(55, 5, "Altitude do drone")
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_text_color(*_TEXT)
-    pdf.cell(0, 5, f"{camera_altitude} m")
-    pdf.ln(5)
-    pdf.set_xy(col2_x, pdf.get_y())
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_text_color(*_MUTED)
-    pdf.cell(55, 5, "FOV horizontal")
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_text_color(*_TEXT)
-    pdf.cell(0, 5, f"{camera_fov}°")
-    pdf.ln(5)
-    pdf.set_xy(col2_x, pdf.get_y())
-    pdf.set_font("Helvetica", "", 8)
-    pdf.set_text_color(*_MUTED)
-    pdf.cell(55, 5, "Área detectada")
-    pdf.set_font("Helvetica", "B", 8)
-    pdf.set_text_color(*_TEXT)
-    pdf.cell(0, 5, f"{crowd_area_m2:,.0f} m²")
-    pdf.ln(8)
-
-    # setores
-    if sectors and len(sectors) > 1:
-        pdf.section_title("Análise por Setor")
-        cols = max(s["col"] for s in sectors) + 1
-        sw   = (190 - (cols - 1) * 3) / cols
-        rows_dict: dict = {}
-        for s in sectors:
-            rows_dict.setdefault(s["row"], []).append(s)
-
-        for row_sectors in rows_dict.values():
-            sy = pdf.get_y()
-            for s in row_sectors:
-                sx = 10 + s["col"] * (sw + 3)
-                pdf.metric(sx, sy, sw, 20,
-                           _s(f"Zona {s['row']+1},{s['col']+1} - {s['density_class']}"),
-                           f"{s['jacobs_count']:,}")
-            pdf.ln(24)
+    # legenda
+    pdf.set_xy(20 + 2*img_w + 16, iy2)
+    pdf.set_font("Helvetica", "", 7)
+    pdf.set_text_color(*_GRAY)
+    note_x = 20 + 2 * img_w + 12
+    pdf.set_xy(note_x, iy2)
+    pdf.multi_cell(
+        170 - 2*img_w - 12, 4,
+        "O frame anotado exibe os contornos das regioes de maior densidade "
+        "detectadas pelo modelo CSRNet.\n\n"
+        "O mapa de calor indica a distribuicao espacial da multidao: "
+        "vermelho = alta densidade, azul = baixa densidade.",
+    )
 
     Path(ann_path).unlink(missing_ok=True)
     Path(heat_path).unlink(missing_ok=True)
