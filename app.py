@@ -151,6 +151,8 @@ _PRESETS = {
 with st.sidebar:
     st.header("Configuração")
 
+    event_name = st.text_input("Nome do evento", value="Evento",
+                               help="Aparece no relatório PDF.")
     preset_key = st.selectbox("Tipo de evento", list(_PRESETS.keys()), index=0)
     preset = _PRESETS[preset_key]
 
@@ -462,7 +464,7 @@ if process_clicked and uploaded is not None:
             _ann_frame = _frame if _ok else np.zeros((360, 640, 3), dtype=np.uint8)
             _heat_frame = cv2.imread(heatmap_path) or np.zeros((360, 640, 3), dtype=np.uint8)
             pdf_bytes = generate_report(
-                event_name=uploaded.name,
+                event_name=event_name,
                 annotated_bgr=_ann_frame,
                 heatmap_bgr=_heat_frame,
                 csrnet_count=result["peak_count"],
@@ -470,11 +472,15 @@ if process_clicked and uploaded is not None:
                 crowd_area_m2=j.get("crowd_area_m2", 0),
                 density_class=j.get("density_class", "—"),
                 density_factor=j.get("density_factor", 0),
+                density_desc=j.get("density_desc", ""),
                 agreement_pct=agr_pct_vid,
+                camera_altitude=float(camera_altitude),
+                camera_fov=float(camera_fov),
                 sectors=j.get("sectors"),
                 is_video=True,
                 peak_count=result["peak_count"],
                 avg_count=result["avg_count"],
+                timeline=result.get("timeline"),
             )
             st.download_button(
                 "📄 Baixar relatório PDF",
@@ -584,7 +590,7 @@ if process_clicked and uploaded is not None:
             j = result.get("jacobs") or {}
             _, agr_pct_img = _agreement(result["count"], j.get("jacobs_count"))
             pdf_bytes = generate_report(
-                event_name=uploaded.name,
+                event_name=event_name,
                 annotated_bgr=result["annotated"],
                 heatmap_bgr=result["heatmap"],
                 csrnet_count=result["count"],
@@ -592,7 +598,10 @@ if process_clicked and uploaded is not None:
                 crowd_area_m2=j.get("crowd_area_m2", 0),
                 density_class=j.get("density_class", "—"),
                 density_factor=j.get("density_factor", 0),
+                density_desc=j.get("density_desc", ""),
                 agreement_pct=agr_pct_img,
+                camera_altitude=float(camera_altitude),
+                camera_fov=float(camera_fov),
                 sectors=j.get("sectors"),
                 is_video=False,
             )
