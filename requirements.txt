@@ -5,3 +5,4 @@ numpy
 streamlit
 pandas
 scipy
+huggingface_hub
