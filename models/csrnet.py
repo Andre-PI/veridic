@@ -20,12 +20,13 @@ class CSRNet(nn.Module):
     frontend_cfg = [64, 64, "M", 128, 128, "M", 256, 256, 256, "M", 512, 512, 512]
     backend_cfg  = [512, 512, 512, 256, 128, 64]
 
-    def __init__(self):
+    def __init__(self, pretrain_frontend=False):
         super().__init__()
         self.frontend = make_layers(self.frontend_cfg)
         self.backend  = make_layers(self.backend_cfg, in_channels=512, dilation=True)
         self.output   = nn.Conv2d(64, 1, kernel_size=1)
-        self._init_weights()
+        if pretrain_frontend:
+            self._init_weights()
 
     def forward(self, x):
         x = self.frontend(x)

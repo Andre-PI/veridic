@@ -1,3 +1,5 @@
+import atexit
+import os
 from pathlib import Path
 from textwrap import dedent
 import tempfile
@@ -10,6 +12,7 @@ from processor import (
     DEFAULT_WEIGHTS_PATH,
     DEFAULT_ZONES_X,
     DEFAULT_ZONES_Y,
+    extract_drone_metadata,
     load_model,
     process_image,
     process_video,
@@ -23,22 +26,51 @@ def get_cached_model(weights_path):
     return load_model(weights_path)
 
 
+_tmp_files: list[str] = []
+
+
+def _cleanup_tmp():
+    for p in _tmp_files:
+        try:
+            os.unlink(p)
+        except OSError:
+            pass
+
+
+atexit.register(_cleanup_tmp)
+
+
 def save_upload(uploaded_file, suffix=None):
     suffix = suffix or Path(uploaded_file.name).suffix or ".mp4"
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     tmp.write(uploaded_file.getbuffer())
     tmp.close()
+    _tmp_files.append(tmp.name)
     return tmp.name
 
 
 def tmp_path(suffix):
     t = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
     t.close()
+    _tmp_files.append(t.name)
     return t.name
 
 
 def render_html(markup):
     st.markdown(dedent(markup).strip(), unsafe_allow_html=True)
+
+
+def _agreement(a, b):
+    if not a or not b:
+        return None, "—"
+    pct = (1 - abs(a - b) / max(a, b)) * 100
+    if pct >= 80:
+        color = "#22f06b"
+    elif pct >= 50:
+        color = "#f0c422"
+    else:
+        color = "#ff385c"
+    return color, f"{pct:.0f}%"
 
 
 render_html("""
@@ -106,9 +138,21 @@ render_html("""
 </style>
 """)
 
+# ── presets de evento ────────────────────────────────────────────────────────
+_PRESETS = {
+    "🎪 Show / Festa junina": dict(sample_interval=8, altitude=50, fov=82.1),
+    "✊ Protesto / Marcha":    dict(sample_interval=15, altitude=50, fov=82.1),
+    "⛪ Concentração estática": dict(sample_interval=20, altitude=40, fov=82.1),
+    "⚙️ Personalizado":         dict(sample_interval=15, altitude=40, fov=82.1),
+}
+
 # ── sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Configuração")
+
+    preset_key = st.selectbox("Tipo de evento", list(_PRESETS.keys()), index=0)
+    preset = _PRESETS[preset_key]
+
     weights_path = st.text_input("Pesos do modelo", value=DEFAULT_WEIGHTS_PATH)
     max_size = st.selectbox(
         "Tamanho de inferência",
@@ -118,18 +162,99 @@ with st.sidebar:
     )
     sample_interval = st.slider(
         "Amostrar a cada N frames (vídeo)",
-        min_value=1, max_value=60, value=15,
+        min_value=1, max_value=60, value=preset["sample_interval"],
         help="1 = todo frame (lento). 15 = a cada 0.5s a 30fps.",
     )
     st.markdown("---")
+    st.subheader("Câmera (Jacobs)")
+    camera_altitude = st.number_input(
+        "Altitude do drone (m)", min_value=5, max_value=300, value=preset["altitude"],
+        help="Posicione o drone sobre o centro do venue. A área coberta pelo frame será usada como área do evento.",
+    )
+    camera_fov = st.number_input(
+        "FOV horizontal (°)", min_value=40.0, max_value=150.0, value=preset["fov"],
+        help="DJI Mini 4 Pro = 82.1°.",
+    )
+
+    gsd_w = round(2 * camera_altitude * __import__('math').tan(__import__('math').radians(camera_fov / 2)), 1)
+    gsd_h = round(gsd_w * 9 / 16, 1)
+    auto_area = round(gsd_w * gsd_h)
+    st.caption(f"📐 Cobertura estimada a {camera_altitude}m: **{gsd_w}m × {gsd_h}m ≈ {auto_area:,} m²**")
+
+    known_area = st.number_input(
+        "Área real do venue (m²)",
+        min_value=0, max_value=500_000, value=0, step=100,
+        help="Deixe 0 para usar a cobertura calculada pelo drone. Preencha quando souber a área exata — aumenta a precisão do Jacobs.",
+    )
+    if known_area > 0:
+        st.caption(f"✅ Usando área informada: **{int(known_area):,} m²**")
+    else:
+        st.caption(f"🔍 Usando área detectada pelo drone: **{auto_area:,} m²**")
+
+    _density_opts = {
+        "Auto (CSRNet)":        None,
+        "espaçada — 1 p/m²":   1.0,
+        "moderada — 2 p/m²":   2.0,
+        "densa — 3 p/m²":      3.0,
+        "aglomerada — 4 p/m²": 4.0,
+        "comprimida — 5 p/m²": 5.0,
+    }
+    global_density_sel = st.selectbox(
+        "Densidade observada (geral)",
+        list(_density_opts.keys()), index=0,
+        help="Observador define a densidade predominante do evento. Sobrescreve o CSRNet no Jacobs.",
+    )
+    global_density = _density_opts[global_density_sel]
+    if global_density:
+        area_ref = int(known_area) if known_area > 0 else auto_area
+        st.caption(f"→ Jacobs estimado: **{int(area_ref * global_density):,} pessoas**")
+    st.markdown("---")
+    st.subheader("Visualização")
+    show_contours = st.checkbox("Mostrar regiões contadas", value=True,
+                                help="Contorna as regiões do frame onde a contagem está ocorrendo.")
+    if show_contours:
+        contour_percentile = st.slider(
+            "Sensibilidade",
+            min_value=10, max_value=90, value=60, step=5,
+            help="Menor = mostra regiões mais fracas também. Maior = só regiões de alta densidade.",
+        )
+    else:
+        contour_percentile = 60
     st.subheader("Zonas")
     show_zones = st.checkbox("Dividir em zonas", value=False)
     if show_zones:
         _zc1, _zc2 = st.columns(2)
         zones_x = int(_zc1.number_input("Colunas", min_value=2, max_value=6, value=DEFAULT_ZONES_X))
         zones_y = int(_zc2.number_input("Linhas",  min_value=2, max_value=6, value=DEFAULT_ZONES_Y))
+
+        _density_options = {
+            "Auto (CSRNet)": None,
+            "espaçada — 1 p/m²": 1.0,
+            "moderada — 2 p/m²": 2.0,
+            "densa — 3 p/m²": 3.0,
+            "aglomerada — 4 p/m²": 4.0,
+            "comprimida — 5 p/m²": 5.0,
+        }
+        st.caption("**Densidade por zona** — observador pode sobrescrever:")
+        manual_densities = {}
+        for r in range(zones_y):
+            cols_ui = st.columns(zones_x)
+            for c in range(zones_x):
+                sel = cols_ui[c].selectbox(
+                    f"Z{r+1},{c+1}", list(_density_options.keys()),
+                    index=0, label_visibility="visible", key=f"zone_{r}_{c}"
+                )
+                if _density_options[sel] is not None:
+                    manual_densities[(r, c)] = _density_options[sel]
     else:
         zones_x, zones_y = DEFAULT_ZONES_X, DEFAULT_ZONES_Y
+        manual_densities = {}
+
+    # densidade global sobrescreve todas as zonas
+    if global_density:
+        for r in range(zones_y):
+            for c in range(zones_x):
+                manual_densities[(r, c)] = global_density
 
 # ── header ────────────────────────────────────────────────────────────────────
 render_html("""
@@ -176,6 +301,31 @@ with upload_col:
         label_visibility="collapsed",
     )
 
+@st.cache_data(show_spinner=False)
+def _cached_drone_meta(file_id, file_bytes, suffix):
+    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    tmp.write(file_bytes)
+    tmp.close()
+    meta = extract_drone_metadata(tmp.name)
+    try:
+        os.unlink(tmp.name)
+    except OSError:
+        pass
+    return meta
+
+# extrai metadados do drone assim que o arquivo é carregado
+if uploaded is not None and uploaded.name.lower().endswith(("mp4", "avi", "mov")):
+    _drone_meta = _cached_drone_meta(
+        uploaded.file_id, uploaded.getvalue(), Path(uploaded.name).suffix
+    )
+    if _drone_meta:
+        if "altitude_m" in _drone_meta:
+            st.sidebar.success(f"🛸 Altitude detectada: **{_drone_meta['altitude_m']} m**")
+        if "fov_deg" in _drone_meta:
+            st.sidebar.success(f"📷 FOV detectado: **{_drone_meta['fov_deg']}°**")
+    else:
+        st.sidebar.caption("ℹ️ Telemetria não encontrada no vídeo — use os valores manuais.")
+
 with btn_col:
     process_clicked = st.button("Analisar", type="primary", disabled=uploaded is None, use_container_width=True)
 
@@ -219,32 +369,62 @@ if process_clicked and uploaded is not None:
             show_zones=show_zones,
             zones_x=zones_x,
             zones_y=zones_y,
+            show_contours=show_contours,
+            contour_percentile=contour_percentile,
             max_size=max_size,
             sample_interval=sample_interval,
+            camera_altitude=float(camera_altitude),
+            camera_fov=float(camera_fov),
+            known_area_m2=float(known_area),
+            manual_densities=manual_densities,
             progress_callback=on_progress,
             preview_callback=on_preview,
         )
         progress_bar.progress(1.0)
 
         with metrics_ph.container():
-            m1, m2, m3 = st.columns(3)
+            j = result.get("jacobs") or {}
+            jcount = j.get("jacobs_count")
+            agr_color, agr_pct = _agreement(result['peak_count'], jcount)
+            dc  = j.get('density_class', '—')
+            fac = j.get('density_factor', '')
+
+            m1, m2, m3, m4, m5, m6 = st.columns(6)
             with m1:
                 render_html(f"""
                 <div class="metric-box">
                     <div class="metric-value">{result['peak_count']:,}</div>
-                    <div class="metric-label">Pico de público</div>
+                    <div class="metric-label">Pico · CSRNet</div>
                 </div>""")
             with m2:
                 render_html(f"""
                 <div class="metric-box">
                     <div class="metric-value">{result['avg_count']:,}</div>
-                    <div class="metric-label">Média durante o evento</div>
+                    <div class="metric-label">Média · CSRNet</div>
                 </div>""")
             with m3:
                 render_html(f"""
                 <div class="metric-box">
-                    <div class="metric-value">{result['frames_sampled']}</div>
-                    <div class="metric-label">Amostras processadas</div>
+                    <div class="metric-value" style="color:#22f06b">{jcount:,}</div>
+                    <div class="metric-label">Estimativa · Jacobs</div>
+                </div>""")
+            with m4:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value" style="font-size:1.3rem">{dc}</div>
+                    <div class="metric-label">{fac} p/m² · densidade</div>
+                </div>""")
+            with m5:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value">{j.get('crowd_area_m2', '—')} m²</div>
+                    <div class="metric-label">Área detectada</div>
+                </div>""")
+            with m6:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value" style="color:{agr_color or '#fff'}">{agr_pct}</div>
+                    <div class="metric-label">Concordância CSRNet↔Jacobs</div>
                 </div>""")
 
         if result["timeline"]:
@@ -282,7 +462,13 @@ if process_clicked and uploaded is not None:
                 show_zones=show_zones,
                 zones_x=zones_x,
                 zones_y=zones_y,
+                show_contours=show_contours,
+                contour_percentile=contour_percentile,
                 max_size=max_size,
+                camera_altitude=float(camera_altitude),
+                camera_fov=float(camera_fov),
+                known_area_m2=float(known_area),
+                manual_densities=manual_densities,
             )
 
         with left_view.container():
@@ -291,21 +477,59 @@ if process_clicked and uploaded is not None:
             st.image(result["heatmap"][:, :, ::-1], channels="RGB", use_container_width=True)
 
         with metrics_ph.container():
-            m1, m2 = st.columns(2)
+            j = result.get("jacobs") or {}
+            jcount = j.get("jacobs_count")
+            agr_color, agr_pct = _agreement(result['count'], jcount)
+            dc  = j.get('density_class', '—')
+            fac = j.get('density_factor', '')
+
+            m1, m2, m3, m4, m5 = st.columns(5)
             with m1:
                 render_html(f"""
                 <div class="metric-box">
                     <div class="metric-value">{result['count']:,}</div>
-                    <div class="metric-label">Pessoas estimadas</div>
+                    <div class="metric-label">Estimativa · CSRNet</div>
                 </div>""")
-            if result["zone_counts"]:
-                with m2:
-                    top_zone = max(result["zone_counts"], key=result["zone_counts"].get)
-                    render_html(f"""
-                    <div class="metric-box">
-                        <div class="metric-value">{result['zone_counts'][top_zone]:,}</div>
-                        <div class="metric-label">Zona mais densa</div>
-                    </div>""")
+            with m2:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value" style="color:#22f06b">{jcount:,}</div>
+                    <div class="metric-label">Estimativa · Jacobs</div>
+                </div>""")
+            with m3:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value" style="font-size:1.3rem">{dc}</div>
+                    <div class="metric-label">{fac} p/m² · densidade</div>
+                </div>""")
+            with m4:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value">{j.get('crowd_area_m2', '—')} m²</div>
+                    <div class="metric-label">Área detectada</div>
+                </div>""")
+            with m5:
+                render_html(f"""
+                <div class="metric-box">
+                    <div class="metric-value" style="color:{agr_color or '#fff'}">{agr_pct}</div>
+                    <div class="metric-label">Concordância CSRNet↔Jacobs</div>
+                </div>""")
+
+            sectors = j.get("sectors", [])
+            if len(sectors) > 1:
+                st.markdown("**Densidade por setor (Jacobs)**")
+                rows = {}
+                for s in sectors:
+                    rows.setdefault(s["row"], []).append(s)
+                for row_sectors in rows.values():
+                    cols = st.columns(len(row_sectors))
+                    for col_widget, s in zip(cols, row_sectors):
+                        with col_widget:
+                            render_html(f"""
+                            <div class="metric-box">
+                                <div class="metric-value" style="font-size:1.1rem">{s['jacobs_count']:,}</div>
+                                <div class="metric-label">{s['density_class']} · {s['density_factor']} p/m²</div>
+                            </div>""")
 
         with download_ph.container():
             dl1, dl2 = st.columns(2)
