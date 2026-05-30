@@ -7,6 +7,7 @@ import tempfile
 import streamlit as st
 import pandas as pd
 
+from report import generate_report
 from processor import (
     DEFAULT_INFERENCE_SIZE,
     DEFAULT_WEIGHTS_PATH,
@@ -452,6 +453,36 @@ if process_clicked and uploaded is not None:
                         mime="image/jpeg",
                         use_container_width=True,
                     )
+
+            j = result.get("jacobs") or {}
+            _, agr_pct_vid = _agreement(result["peak_count"], j.get("jacobs_count"))
+            _ann = cv2.VideoCapture(output_path)
+            _ok, _frame = _ann.read()
+            _ann.release()
+            _ann_frame = _frame if _ok else np.zeros((360, 640, 3), dtype=np.uint8)
+            _heat_frame = cv2.imread(heatmap_path) or np.zeros((360, 640, 3), dtype=np.uint8)
+            pdf_bytes = generate_report(
+                event_name=uploaded.name,
+                annotated_bgr=_ann_frame,
+                heatmap_bgr=_heat_frame,
+                csrnet_count=result["peak_count"],
+                jacobs_count=j.get("jacobs_count", 0),
+                crowd_area_m2=j.get("crowd_area_m2", 0),
+                density_class=j.get("density_class", "—"),
+                density_factor=j.get("density_factor", 0),
+                agreement_pct=agr_pct_vid,
+                sectors=j.get("sectors"),
+                is_video=True,
+                peak_count=result["peak_count"],
+                avg_count=result["avg_count"],
+            )
+            st.download_button(
+                "📄 Baixar relatório PDF",
+                data=pdf_bytes,
+                file_name="veridic_relatorio.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
     else:
         with st.spinner("Processando..."):
             result = process_image(
@@ -549,3 +580,26 @@ if process_clicked and uploaded is not None:
                     mime="image/jpeg",
                     use_container_width=True,
                 )
+
+            j = result.get("jacobs") or {}
+            _, agr_pct_img = _agreement(result["count"], j.get("jacobs_count"))
+            pdf_bytes = generate_report(
+                event_name=uploaded.name,
+                annotated_bgr=result["annotated"],
+                heatmap_bgr=result["heatmap"],
+                csrnet_count=result["count"],
+                jacobs_count=j.get("jacobs_count", 0),
+                crowd_area_m2=j.get("crowd_area_m2", 0),
+                density_class=j.get("density_class", "—"),
+                density_factor=j.get("density_factor", 0),
+                agreement_pct=agr_pct_img,
+                sectors=j.get("sectors"),
+                is_video=False,
+            )
+            st.download_button(
+                "📄 Baixar relatório PDF",
+                data=pdf_bytes,
+                file_name="veridic_relatorio.pdf",
+                mime="application/pdf",
+                use_container_width=True,
+            )
