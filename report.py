@@ -150,40 +150,6 @@ def generate_report(
     pdf.row("FOV horizontal",    f"{camera_fov} graus  (DJI Mini 4 Pro)")
     pdf.divider()
 
-    # ── setores ──────────────────────────────────────────────────────────────
-    if sectors and len(sectors) > 1:
-        pdf.section("Analise por Setor")
-        # cabeçalho da tabela
-        pdf.set_x(22)
-        pdf.set_font("Helvetica", "B", 7.5)
-        pdf.set_text_color(*_GRAY)
-        pdf.cell(25, 5, "Zona")
-        pdf.cell(40, 5, "Classificacao")
-        pdf.cell(30, 5, "Fator (p/m2)")
-        pdf.cell(35, 5, "Estimativa Jacobs")
-        pdf.cell(30, 5, "Estimativa CSRNet")
-        pdf.ln(5)
-        pdf.set_draw_color(*_LGRAY)
-        pdf.line(22, pdf.get_y(), 188, pdf.get_y())
-        pdf.ln(1)
-
-        for s in sorted(sectors, key=lambda x: (x["row"], x["col"])):
-            pdf.set_x(22)
-            pdf.set_font("Helvetica", "", 8)
-            pdf.set_text_color(*_BLACK)
-            pdf.cell(25, 5, f"Zona {s['row']+1},{s['col']+1}")
-            pdf.cell(40, 5, _s(s["density_class"]))
-            pdf.cell(30, 5, str(s["density_factor"]))
-            pdf.set_font("Helvetica", "B", 8)
-            pdf.set_text_color(*_TEAL)
-            pdf.cell(35, 5, f"{s['jacobs_count']:,}")
-            pdf.set_text_color(*_BLACK)
-            pdf.set_font("Helvetica", "", 8)
-            pdf.cell(30, 5, f"{s['csrnet_count']:,}")
-            pdf.ln(5)
-
-        pdf.divider()
-
     # ── imagens ──────────────────────────────────────────────────────────────
     pdf.section("Evidencia Visual")
 
