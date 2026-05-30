@@ -214,19 +214,15 @@ def generate_report(
     pdf.rect(20+img_w+8,  iy2, img_w, img_h)
     pdf.image(ann_path,  20,         iy2, img_w, img_h)
     pdf.image(heat_path, 20+img_w+8, iy2, img_w, img_h)
+    pdf.ln(img_h + 3)
 
-    # legenda
-    pdf.set_xy(20 + 2*img_w + 16, iy2)
-    pdf.set_font("Helvetica", "", 7)
+    pdf.set_x(20)
+    pdf.set_font("Helvetica", "I", 7)
     pdf.set_text_color(*_GRAY)
-    note_x = 20 + 2 * img_w + 12
-    pdf.set_xy(note_x, iy2)
-    pdf.multi_cell(
-        170 - 2*img_w - 12, 4,
-        "O frame anotado exibe os contornos das regioes de maior densidade "
-        "detectadas pelo modelo CSRNet.\n\n"
-        "O mapa de calor indica a distribuicao espacial da multidao: "
-        "vermelho = alta densidade, azul = baixa densidade.",
+    pdf.cell(
+        170, 4,
+        "Esquerda: contornos de densidade (CSRNet). "
+        "Direita: mapa de calor - vermelho = alta densidade, azul = baixa densidade.",
     )
 
     Path(ann_path).unlink(missing_ok=True)
