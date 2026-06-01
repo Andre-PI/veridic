@@ -7,3 +7,4 @@ pandas
 scipy
 huggingface_hub
 fpdf2
+streamlit-drawable-canvas
