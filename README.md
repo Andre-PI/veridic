@@ -61,6 +61,12 @@ ou
 pip install -r requirements.txt
 ```
 
+## Instalar weights para CSRNet
+
+```bash
+uv run python3 download_weights.py
+```
+
 ## Iniciar
 
 ```bash
