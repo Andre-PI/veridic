@@ -14,7 +14,7 @@ import streamlit as st
 import pandas as pd
 
 from jacobs_real import draw_jacobs_grid, jacobs_estimate
-from report import generate_report
+from report import generate_report, generate_jacobs_report
 from processor import (
     DEFAULT_INFERENCE_SIZE,
     DEFAULT_WEIGHTS_PATH,
@@ -960,3 +960,45 @@ with tab2:
                             f"Densidade implícita: **{density:.2f} p/m²** "
                             f"({est['avg_per_cell']:.1f} pessoas / {cell_area_m2:.1f} m² por célula)"
                         )
+
+                    st.markdown("")
+
+                    # monta dict de contagens para o relatório
+                    _cell_counts = {
+                        int(row["Célula"]): int(row["Contagem"])
+                        for _, row in edited_counts.iterrows()
+                        if pd.notna(row["Contagem"])
+                    }
+
+                    pdf_bytes = generate_jacobs_report(
+                        event_name=j2_event,
+                        audit_code=audit_code,
+                        grid_rows=j2_rows,
+                        grid_cols=j2_cols,
+                        total_cells=total_cells,
+                        excluded_cells=sorted(excluded_set),
+                        sampled_cells=sampled,
+                        cell_counts=_cell_counts,
+                        estimate=est["estimate"],
+                        margin=est["margin"],
+                        lower=est["lower"],
+                        upper=est["upper"],
+                        avg_per_cell=est["avg_per_cell"],
+                        std_per_cell=est["std_per_cell"],
+                        coverage_pct=est["coverage_pct"],
+                        crowd_cells=est["crowd_cells"],
+                        cell_area_m2=cell_area_m2,
+                        camera_altitude=float(j2_altitude),
+                        camera_fov=float(j2_fov),
+                        grid_image_bgr=_g2,
+                        ground_w=ground_w,
+                        ground_h=ground_h,
+                    )
+
+                    st.download_button(
+                        "📄 Baixar relatório PDF",
+                        data=pdf_bytes,
+                        file_name="veridic_jacobs_relatorio.pdf",
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
