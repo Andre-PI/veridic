@@ -11,6 +11,7 @@ Estimativa de público por imagens aéreas de drone. Duas abas:
 ```bash
 git clone https://github.com/Andre-PI/veridic
 cd veridic
+
 chmod +x setup.sh
 ./setup.sh
 ```
@@ -18,11 +19,47 @@ chmod +x setup.sh
 ### Windows
 ```bat
 git clone https://github.com/Andre-PI/veridic
+
+--------#######---------
+
 cd veridic
 setup.bat
 ```
 
 O setup cria o ambiente virtual, instala as dependências e baixa os pesos do CSRNet automaticamente via Hugging Face.
+
+## Opcional( Instalar UV gerenciador ultra rapido )
+
+```bash
+brew install uv (macOS usando homebrew)
+```
+
+## Criar um abiente virtual
+
+```bash
+python3 -m venv .venv
+
+ou
+
+uv venv (usando uv)
+
+```
+
+## Iniciar Ambiente Virtual
+
+```bash
+source .venv/bin/activate
+```
+
+## Instalar as dependencias usando o file `requirements.txt`
+
+```bash
+uv pip install -r requirements.txt (usando uv)
+
+ou
+
+pip install -r requirements.txt
+```
 
 ## Iniciar
 
