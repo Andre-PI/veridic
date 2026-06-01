@@ -1,8 +1,10 @@
 import atexit
+from datetime import date
 import hashlib
 import math
 import os
 from pathlib import Path
+import random
 from textwrap import dedent
 import tempfile
 
@@ -643,8 +645,8 @@ with tab2:
         <span style="font-size:1.1rem;font-weight:800;">Método de Jacobs — contagem manual por grade</span><br>
         <span style="font-size:0.82rem;color:#93a4bd;">
             Faça upload de uma foto tirada pelo drone diretamente acima do público.
-            A grade é desenhada sobre a imagem. Conte as pessoas visualmente em células representativas
-            e registre abaixo. O app extrapola para toda a área com intervalo de confiança de 95%.
+            O app sorteia aleatoriamente as células a contar antes da contagem acontecer —
+            garantindo amostragem representativa e rastreabilidade via código de auditoria.
         </span>
     </div>
     """)
@@ -667,29 +669,29 @@ with tab2:
         raw_bytes = j2_uploaded.getvalue()
         file_bytes = np.frombuffer(raw_bytes, np.uint8)
         j2_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-        # hash do conteúdo — garante reset do editor quando a imagem muda,
-        # mesmo que as dimensões da grade permaneçam iguais
         _file_hash = hashlib.md5(raw_bytes).hexdigest()[:8]
 
         if j2_image is None:
             st.error("Não foi possível abrir a imagem.")
         else:
             # ── configuração ──────────────────────────────────────────────────
-            cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns([1, 1, 1, 1, 2])
+            cfg1, cfg2, cfg3, cfg4, cfg5, cfg6 = st.columns([1, 1, 1, 1, 1, 2])
             with cfg1:
-                j2_cols = int(st.number_input("Colunas da grade", min_value=2, max_value=20, value=8, key="j2_cols"))
+                j2_cols = int(st.number_input("Colunas", min_value=2, max_value=20, value=8, key="j2_cols"))
             with cfg2:
-                j2_rows = int(st.number_input("Linhas da grade", min_value=2, max_value=20, value=6, key="j2_rows"))
+                j2_rows = int(st.number_input("Linhas", min_value=2, max_value=20, value=6, key="j2_rows"))
             with cfg3:
-                j2_altitude = st.number_input("Altitude (m)", min_value=5, max_value=300, value=50, key="j2_alt",
-                                              help="Usado para calcular a área coberta por cada célula.")
+                j2_altitude = st.number_input("Altitude (m)", min_value=5, max_value=300, value=50, key="j2_alt")
             with cfg4:
-                j2_fov = st.number_input("FOV horizontal (°)", min_value=40.0, max_value=150.0, value=82.1,
-                                         key="j2_fov")
+                j2_fov = st.number_input("FOV (°)", min_value=40.0, max_value=150.0, value=82.1, key="j2_fov")
             with cfg5:
+                j2_n_sample = int(st.number_input(
+                    "Células a sortear", min_value=1, max_value=100, value=10, key="j2_n",
+                    help="Quantas células serão sorteadas para contagem manual. Mínimo recomendado: 8.",
+                ))
+            with cfg6:
                 j2_event = st.text_input("Nome do evento", value="Evento", key="j2_event_name")
 
-            # área por célula
             img_h, img_w = j2_image.shape[:2]
             ground_w = 2 * j2_altitude * math.tan(math.radians(j2_fov / 2))
             ground_h = ground_w * (img_h / img_w)
@@ -698,86 +700,187 @@ with tab2:
 
             st.caption(
                 f"📐 Cobertura total: **{ground_w:.1f}m × {ground_h:.1f}m** — "
-                f"cada célula cobre **≈ {cell_area_m2:.1f} m²** "
+                f"cada célula ≈ **{cell_area_m2:.1f} m²** "
                 f"({j2_rows}×{j2_cols} = {total_cells} células)"
             )
             st.warning(
                 "A foto deve ser tirada com o drone **diretamente acima do público** (nadir). "
-                "Em fotos inclinadas, as células mais distantes cobrem áreas maiores no solo — "
+                "Em fotos inclinadas as células distantes cobrem áreas maiores no solo — "
                 "a contagem fica enviesada e a extrapolação perde validade.",
                 icon="⚠️",
             )
 
-            st.markdown("")
+            st.markdown("---")
 
-            # ── layout: imagem | tabela ───────────────────────────────────────
-            img_col, tbl_col = st.columns([3, 2], gap="large")
+            # ── state por sessão (chave inclui hash + grade) ──────────────────
+            _sk = f"j2_{_file_hash}_{j2_rows}_{j2_cols}"
 
-            # placeholder para a imagem — será preenchida APÓS a leitura do editor
-            with img_col:
-                img_placeholder = st.empty()
+            def _init(key, val):
+                if key not in st.session_state:
+                    st.session_state[key] = val
 
-            with tbl_col:
-                st.markdown("**Contagem por célula**")
-                render_html("""
-                <div style="font-size:0.78rem;color:#93a4bd;margin-bottom:0.5rem;">
-                    <span class="legend-dot" style="background:#22f06b;"></span>amostrada &nbsp;
-                    <span class="legend-dot" style="background:#3333cc;"></span>excluída (palco, saída, vazio)
-                    <br>Deixe <em>Contagem</em> em branco nas células não amostradas —
-                    o app usa a média das amostradas para extrapolar.
+            _init(f"{_sk}_excl", set())
+            _init(f"{_sk}_excl_locked", False)
+            _init(f"{_sk}_sampled", [])
+            _init(f"{_sk}_seed", None)
+
+            # ── FASE 1: marcar células excluídas ─────────────────────────────
+            render_html("""
+            <div style="font-size:0.95rem;font-weight:800;margin-bottom:0.5rem;">
+                1 — Marque as células sem público
+            </div>
+            <div style="font-size:0.8rem;color:#93a4bd;margin-bottom:0.75rem;">
+                Palco, área técnica, corredores, camarotes fechados. Essas células serão
+                excluídas do sorteio e da extrapolação.
+            </div>
+            """)
+
+            excl_locked = st.session_state[f"{_sk}_excl_locked"]
+
+            ph_excl_img = st.empty()
+
+            if not excl_locked:
+                excl_sel = st.multiselect(
+                    "Células excluídas",
+                    options=list(range(1, total_cells + 1)),
+                    default=sorted(st.session_state[f"{_sk}_excl"]),
+                    key=f"{_sk}_excl_widget",
+                    label_visibility="collapsed",
+                    placeholder="Selecione as células sem público (palco, saída, área técnica…)",
+                )
+                st.session_state[f"{_sk}_excl"] = set(excl_sel)
+
+                if st.button("Confirmar exclusões e realizar sorteio", type="primary"):
+                    crowd_pool = [i for i in range(1, total_cells + 1)
+                                  if i not in st.session_state[f"{_sk}_excl"]]
+                    n = min(j2_n_sample, len(crowd_pool))
+                    seed = random.randint(100_000, 999_999)
+                    sampled = sorted(random.Random(seed).sample(crowd_pool, n))
+                    st.session_state[f"{_sk}_excl_locked"] = True
+                    st.session_state[f"{_sk}_sampled"] = sampled
+                    st.session_state[f"{_sk}_seed"] = seed
+                    st.rerun()
+            else:
+                excl_list = sorted(st.session_state[f"{_sk}_excl"])
+                st.success(
+                    f"Excluídas: {excl_list if excl_list else 'nenhuma'} "
+                    f"({len(excl_list)} célula{'s' if len(excl_list) != 1 else ''})"
+                )
+                if st.button("↩ Refazer exclusões", type="secondary",
+                             help="Atenção: isso apaga o sorteio atual e exige um novo."):
+                    st.session_state[f"{_sk}_excl_locked"] = False
+                    st.session_state[f"{_sk}_sampled"] = []
+                    st.session_state[f"{_sk}_seed"] = None
+                    st.rerun()
+
+            # imagem da fase 1 (mostra exclusões, ainda sem sorteio)
+            _sampled_now = set(st.session_state[f"{_sk}_sampled"])
+            _excl_now    = st.session_state[f"{_sk}_excl"]
+            with ph_excl_img:
+                _g = draw_jacobs_grid(j2_image, j2_rows, j2_cols, _sampled_now, _excl_now)
+                st.image(_g[:, :, ::-1], channels="RGB", use_container_width=True)
+
+            # ── FASE 2: sorteio realizado ─────────────────────────────────────
+            sampled = st.session_state[f"{_sk}_sampled"]
+            seed    = st.session_state[f"{_sk}_seed"]
+
+            if not sampled:
+                st.stop()
+
+            st.markdown("---")
+
+            excluded_set   = st.session_state[f"{_sk}_excl"]
+            excluded_count = len(excluded_set)
+            crowd_cells    = total_cells - excluded_count
+
+            # código de auditoria — reproduzível: mesmo seed + grade + exclusões → mesmas células
+            audit_date  = date.today().strftime("%Y%m%d")
+            audit_excl  = "-".join(str(x) for x in sorted(excluded_set)) or "0"
+            audit_cells = "-".join(str(x) for x in sampled)
+            audit_code  = f"VRD·{_file_hash}·{audit_date}·{j2_rows}x{j2_cols}·X{audit_excl}·S{seed}"
+
+            render_html(f"""
+            <div style="font-size:0.95rem;font-weight:800;margin-bottom:0.5rem;">
+                2 — Células sorteadas para contagem
+            </div>
+            <div style="
+                padding:1rem 1.25rem;border:1px solid rgba(34,240,107,0.35);border-radius:8px;
+                background:rgba(8,22,14,0.7);margin-bottom:0.75rem;
+            ">
+                <div style="font-size:0.78rem;color:#93a4bd;font-weight:700;margin-bottom:0.3rem;">
+                    CÉLULAS A CONTAR ({len(sampled)} de {crowd_cells} de público)
                 </div>
-                """)
+                <div style="font-size:1.25rem;font-weight:900;color:#22f06b;letter-spacing:0.04em;">
+                    {" · ".join(str(c) for c in sampled)}
+                </div>
+                <div style="font-size:0.72rem;color:#93a4bd;margin-top:0.6rem;">
+                    Código de auditoria: <code style="color:#f5f8ff;">{audit_code}</code>
+                </div>
+            </div>
+            <div style="font-size:0.8rem;color:#93a4bd;margin-bottom:0.5rem;">
+                Fotografe ou anote o código antes de ir a campo.
+                Qualquer pessoa com a mesma imagem, mesma grade e mesmo seed consegue verificar
+                que o sorteio foi feito antes da contagem.
+            </div>
+            """)
 
-                # chave inclui hash do arquivo: troca de imagem sempre reseta o editor
-                editor_key = f"j2_editor_{j2_rows}_{j2_cols}_{_file_hash}"
+            st.markdown("---")
 
-                _rows_data = []
-                for r in range(j2_rows):
-                    for c in range(j2_cols):
-                        _rows_data.append({
-                            "Célula": r * j2_cols + c + 1,
-                            "Contagem": pd.NA,
-                            "Excluída": False,
-                        })
-                _base_df = pd.DataFrame(_rows_data).astype({"Contagem": pd.Int64Dtype()})
+            # ── FASE 3: contagem ──────────────────────────────────────────────
+            render_html("""
+            <div style="font-size:0.95rem;font-weight:800;margin-bottom:0.5rem;">
+                3 — Registre a contagem de cada célula sorteada
+            </div>
+            <div style="font-size:0.8rem;color:#93a4bd;margin-bottom:0.75rem;">
+                Preencha apenas as células da lista acima. Não altere quais células contar
+                após ver a imagem — isso invalida a aleatoriedade do sorteio.
+            </div>
+            """)
 
-                edited_df = st.data_editor(
-                    _base_df,
-                    key=editor_key,
+            count_col, img_col2 = st.columns([2, 3], gap="large")
+
+            with count_col:
+                _count_data = [{"Célula": c, "Contagem": pd.NA} for c in sampled]
+                _count_df   = pd.DataFrame(_count_data).astype({"Contagem": pd.Int64Dtype()})
+
+                edited_counts = st.data_editor(
+                    _count_df,
+                    key=f"j2_count_{_sk}_{seed}",
                     column_config={
                         "Célula": st.column_config.NumberColumn("Célula", disabled=True, width="small"),
                         "Contagem": st.column_config.NumberColumn(
                             "Contagem", min_value=0, step=1, width="medium",
-                            help="Número de pessoas contadas visualmente nesta célula.",
-                        ),
-                        "Excluída": st.column_config.CheckboxColumn(
-                            "Excluída", width="small",
-                            help="Marque células sem público (palco, área livre, saída).",
+                            help="Pessoas contadas visualmente nesta célula.",
                         ),
                     },
                     hide_index=True,
                     use_container_width=True,
-                    height=min(500, total_cells * 36 + 40),
+                    height=min(520, len(sampled) * 36 + 42),
                 )
 
-            # ── atualiza imagem com highlights baseados no editor ─────────────
-            sampled_set  = set(edited_df[~edited_df["Excluída"] & edited_df["Contagem"].notna()]["Célula"].tolist())
-            excluded_set = set(edited_df[edited_df["Excluída"]]["Célula"].tolist())
+            with img_col2:
+                _counted_set = set(
+                    edited_counts[edited_counts["Contagem"].notna()]["Célula"].tolist()
+                )
+                _g2 = draw_jacobs_grid(j2_image, j2_rows, j2_cols, _counted_set, excluded_set)
+                st.image(_g2[:, :, ::-1], channels="RGB", use_container_width=True)
+                render_html(f"""
+                <div style="font-size:0.75rem;color:#93a4bd;margin-top:0.3rem;">
+                    <span class="legend-dot" style="background:#22f06b;"></span>contada &nbsp;
+                    <span class="legend-dot" style="background:#3333cc;"></span>excluída &nbsp;
+                    <span style="color:#f5f8ff;">{len(_counted_set)}/{len(sampled)}</span> preenchidas
+                </div>
+                """)
 
-            grid_img = draw_jacobs_grid(j2_image, j2_rows, j2_cols, sampled_set, excluded_set)
-            with img_placeholder:
-                st.image(grid_img[:, :, ::-1], channels="RGB", use_container_width=True)
-
-            # ── cálculo da estimativa ─────────────────────────────────────────
-            sampled_rows  = edited_df[~edited_df["Excluída"] & edited_df["Contagem"].notna()]
-            sampled_counts = [int(x) for x in sampled_rows["Contagem"].tolist()]
-            excluded_count = int(edited_df["Excluída"].sum())
+            # ── FASE 4: resultado ─────────────────────────────────────────────
+            sampled_counts = [int(x) for x in edited_counts["Contagem"].dropna().tolist()]
 
             st.markdown("")
 
             if not sampled_counts:
                 render_html("""
-                <div style="padding:1rem;color:#93a4bd;border:1px dashed rgba(106,132,173,0.3);border-radius:8px;text-align:center;">
+                <div style="padding:1rem;color:#93a4bd;border:1px dashed rgba(106,132,173,0.3);
+                            border-radius:8px;text-align:center;">
                     Preencha a contagem de pelo menos uma célula para ver a estimativa.
                 </div>
                 """)
@@ -787,30 +890,32 @@ with tab2:
                 if est is None:
                     st.warning("Todas as células estão excluídas — não há área de público para estimar.")
                 else:
-                    # resultado principal
+                    st.markdown("---")
                     render_html(f"""
                     <div class="jacobs-result">
                         <div style="font-size:0.85rem;color:#93a4bd;font-weight:700;margin-bottom:0.25rem;">
-                            ESTIMATIVA JACOBS REAL
+                            ESTIMATIVA JACOBS REAL &nbsp;·&nbsp;
+                            <span style="font-weight:400;font-size:0.78rem;">{j2_event}</span>
                         </div>
                         <div class="jacobs-estimate">{est['estimate']:,}</div>
                         <div class="jacobs-ci">
                             ± {est['margin']:,} pessoas &nbsp;·&nbsp;
                             intervalo [{est['lower']:,} — {est['upper']:,}]
-                            &nbsp;<span title="Válido somente se as células foram escolhidas de forma representativa (aleatória ou sistemática). Seleção por conveniência pode introduzir viés não capturado por este intervalo." style="cursor:help;border-bottom:1px dotted #93a4bd;">⚠ premissa de representatividade</span>
+                        </div>
+                        <div style="font-size:0.72rem;color:#93a4bd;margin-top:0.6rem;">
+                            Auditoria: <code style="color:#f5f8ff;">{audit_code}</code>
                         </div>
                     </div>
                     """)
 
                     st.markdown("")
 
-                    # métricas de qualidade da amostra
                     s1, s2, s3, s4, s5 = st.columns(5)
                     with s1:
                         render_html(f"""
                         <div class="metric-box">
                             <div class="metric-value" style="font-size:1.6rem">{est['sampled_cells']}</div>
-                            <div class="metric-label">Células amostradas</div>
+                            <div class="metric-label">Células contadas</div>
                         </div>""")
                     with s2:
                         render_html(f"""
@@ -838,19 +943,17 @@ with tab2:
                             <div class="metric-label">Desvio padrão / célula</div>
                         </div>""")
 
-                    # aviso de qualidade da amostra
                     if est["sampled_cells"] < 5:
                         st.warning(
                             f"Amostra pequena ({est['sampled_cells']} célula{'s' if est['sampled_cells'] > 1 else ''}). "
-                            "Recomenda-se amostrar pelo menos 5–10 células distribuídas pela área para reduzir a margem de erro."
+                            "Recomenda-se sortear ao menos 8 células para reduzir a margem."
                         )
                     elif est["coverage_pct"] >= 30:
                         st.success(
-                            f"Boa cobertura ({est['coverage_pct']}% das células de público amostradas). "
-                            "Estimativa confiável."
+                            f"Boa cobertura ({est['coverage_pct']}% das células de público). "
+                            "Estimativa com alta confiabilidade."
                         )
 
-                    # densidade implícita
                     if cell_area_m2 > 0 and est["avg_per_cell"] > 0:
                         density = est["avg_per_cell"] / cell_area_m2
                         st.caption(
