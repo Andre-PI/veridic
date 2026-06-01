@@ -1,12 +1,17 @@
 import atexit
+import hashlib
+import math
 import os
 from pathlib import Path
 from textwrap import dedent
 import tempfile
 
+import cv2
+import numpy as np
 import streamlit as st
 import pandas as pd
 
+from jacobs_real import draw_jacobs_grid, jacobs_estimate
 from report import generate_report
 from processor import (
     DEFAULT_INFERENCE_SIZE,
@@ -136,6 +141,16 @@ render_html("""
     }
     .metric-value { font-size: 2rem; font-weight: 900; color: #fff; }
     .metric-label { font-size: 0.82rem; color: var(--muted); font-weight: 700; margin-top: 0.2rem; }
+    .jacobs-result {
+        padding: 1.5rem; border: 1px solid rgba(34,240,107,0.4); border-radius: 10px;
+        background: rgba(8,22,14,0.85); margin-top: 1rem;
+    }
+    .jacobs-estimate { font-size: 3rem; font-weight: 900; color: #22f06b; }
+    .jacobs-ci { font-size: 1rem; color: var(--muted); margin-top: 0.25rem; }
+    .legend-dot {
+        display: inline-block; width: 12px; height: 12px;
+        border-radius: 3px; margin-right: 6px; vertical-align: middle;
+    }
 </style>
 """)
 
@@ -147,7 +162,7 @@ _PRESETS = {
     "⚙️ Personalizado":         dict(sample_interval=15, altitude=40, fov=82.1),
 }
 
-# ── sidebar ──────────────────────────────────────────────────────────────────
+# ── sidebar (CSRNet) ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Configuração")
 
@@ -169,7 +184,7 @@ with st.sidebar:
         help="1 = todo frame (lento). 15 = a cada 0.5s a 30fps.",
     )
     st.markdown("---")
-    st.subheader("Câmera (Jacobs)")
+    st.subheader("Câmera (Jacobs estimado)")
     camera_altitude = st.number_input(
         "Altitude do drone (m)", min_value=5, max_value=300, value=preset["altitude"],
         help="Posicione o drone sobre o centro do venue. A área coberta pelo frame será usada como área do evento.",
@@ -179,7 +194,7 @@ with st.sidebar:
         help="DJI Mini 4 Pro = 82.1°.",
     )
 
-    gsd_w = round(2 * camera_altitude * __import__('math').tan(__import__('math').radians(camera_fov / 2)), 1)
+    gsd_w = round(2 * camera_altitude * math.tan(math.radians(camera_fov / 2)), 1)
     gsd_h = round(gsd_w * 9 / 16, 1)
     auto_area = round(gsd_w * gsd_h)
     st.caption(f"📐 Cobertura estimada a {camera_altitude}m: **{gsd_w}m × {gsd_h}m ≈ {auto_area:,} m²**")
@@ -253,7 +268,6 @@ with st.sidebar:
         zones_x, zones_y = DEFAULT_ZONES_X, DEFAULT_ZONES_Y
         manual_densities = {}
 
-    # densidade global sobrescreve todas as zonas
     if global_density:
         for r in range(zones_y):
             for c in range(zones_x):
@@ -280,219 +294,95 @@ render_html("""
 
 st.markdown("")
 
-# ── layout principal ──────────────────────────────────────────────────────────
-left_col, right_col = st.columns(2, gap="large")
+# ── abas principais ───────────────────────────────────────────────────────────
+tab1, tab2 = st.tabs(["📡  CSRNet + Jacobs estimado", "📐  Jacobs real (campo)"])
 
-with left_col:
-    with st.container(key="left_panel"):
-        left_view = st.empty()
-        left_view.markdown("*Faça upload de uma imagem ou vídeo para começar.*")
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 1 — CSRNet automático
+# ══════════════════════════════════════════════════════════════════════════════
+with tab1:
+    left_col, right_col = st.columns(2, gap="large")
 
-with right_col:
-    with st.container(key="right_panel"):
-        right_view = st.empty()
-        right_view.markdown("*O mapa de densidade aparecerá aqui.*")
+    with left_col:
+        with st.container(key="left_panel"):
+            left_view = st.empty()
+            left_view.markdown("*Faça upload de uma imagem ou vídeo para começar.*")
 
-# ── toolbar ───────────────────────────────────────────────────────────────────
-st.markdown("")
-upload_col, btn_col = st.columns([3, 1])
+    with right_col:
+        with st.container(key="right_panel"):
+            right_view = st.empty()
+            right_view.markdown("*O mapa de densidade aparecerá aqui.*")
 
-with upload_col:
-    uploaded = st.file_uploader(
-        "Imagem ou vídeo",
-        type=("jpg", "jpeg", "png", "mp4", "avi", "mov"),
-        label_visibility="collapsed",
-    )
+    st.markdown("")
+    upload_col, btn_col = st.columns([3, 1])
 
-@st.cache_data(show_spinner=False)
-def _cached_drone_meta(file_id, file_bytes, suffix):
-    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
-    tmp.write(file_bytes)
-    tmp.close()
-    meta = extract_drone_metadata(tmp.name)
-    try:
-        os.unlink(tmp.name)
-    except OSError:
-        pass
-    return meta
-
-# extrai metadados do drone assim que o arquivo é carregado
-if uploaded is not None and uploaded.name.lower().endswith(("mp4", "avi", "mov")):
-    _drone_meta = _cached_drone_meta(
-        uploaded.file_id, uploaded.getvalue(), Path(uploaded.name).suffix
-    )
-    if _drone_meta:
-        if "altitude_m" in _drone_meta:
-            st.sidebar.success(f"🛸 Altitude detectada: **{_drone_meta['altitude_m']} m**")
-        if "fov_deg" in _drone_meta:
-            st.sidebar.success(f"📷 FOV detectado: **{_drone_meta['fov_deg']}°**")
-    else:
-        st.sidebar.caption("ℹ️ Telemetria não encontrada no vídeo — use os valores manuais.")
-
-with btn_col:
-    process_clicked = st.button("Analisar", type="primary", disabled=uploaded is None, use_container_width=True)
-
-progress_ph = st.empty()
-metrics_ph  = st.empty()
-timeline_ph = st.empty()
-download_ph = st.empty()
-
-# ── processamento ─────────────────────────────────────────────────────────────
-if process_clicked and uploaded is not None:
-    if not Path(weights_path).exists():
-        st.error(f"Pesos não encontrados: {weights_path}\nBaixe em: https://github.com/leeyeehoo/CSRNet-pytorch — coloque em weights/csrnet_sha.pth")
-        st.stop()
-
-    model = get_cached_model(weights_path)
-    is_video = uploaded.name.lower().endswith(("mp4", "avi", "mov"))
-    suffix = Path(uploaded.name).suffix
-    input_path  = save_upload(uploaded, suffix)
-    output_path = tmp_path(suffix if is_video else ".jpg")
-    heatmap_path = tmp_path(".jpg")
-
-    if is_video:
-        progress_bar = progress_ph.progress(0)
-
-        def on_progress(v):
-            progress_bar.progress(v)
-
-        def on_preview(frame, count, heatmap):
-            rgb_frame   = frame[:, :, ::-1]
-            rgb_heatmap = heatmap[:, :, ::-1]
-            with left_view.container():
-                st.image(rgb_frame, channels="RGB", use_container_width=True)
-            with right_view.container():
-                st.image(rgb_heatmap, channels="RGB", use_container_width=True)
-
-        result = process_video(
-            video_path=input_path,
-            model=model,
-            output_path=output_path,
-            heatmap_path=heatmap_path,
-            show_zones=show_zones,
-            zones_x=zones_x,
-            zones_y=zones_y,
-            show_contours=show_contours,
-            contour_percentile=contour_percentile,
-            max_size=max_size,
-            sample_interval=sample_interval,
-            camera_altitude=float(camera_altitude),
-            camera_fov=float(camera_fov),
-            known_area_m2=float(known_area),
-            manual_densities=manual_densities,
-            progress_callback=on_progress,
-            preview_callback=on_preview,
+    with upload_col:
+        uploaded = st.file_uploader(
+            "Imagem ou vídeo",
+            type=("jpg", "jpeg", "png", "mp4", "avi", "mov"),
+            label_visibility="collapsed",
         )
-        progress_bar.progress(1.0)
 
-        with metrics_ph.container():
-            j = result.get("jacobs") or {}
-            jcount = j.get("jacobs_count")
-            agr_color, agr_pct = _agreement(result['peak_count'], jcount)
-            dc  = j.get('density_class', '—')
-            fac = j.get('density_factor', '')
+    @st.cache_data(show_spinner=False)
+    def _cached_drone_meta(file_id, file_bytes, suffix):
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+        tmp.write(file_bytes)
+        tmp.close()
+        meta = extract_drone_metadata(tmp.name)
+        try:
+            os.unlink(tmp.name)
+        except OSError:
+            pass
+        return meta
 
-            m1, m2, m3, m4, m5, m6 = st.columns(6)
-            with m1:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value">{result['peak_count']:,}</div>
-                    <div class="metric-label">Pico · CSRNet</div>
-                </div>""")
-            with m2:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value">{result['avg_count']:,}</div>
-                    <div class="metric-label">Média · CSRNet</div>
-                </div>""")
-            with m3:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value" style="color:#22f06b">{jcount:,}</div>
-                    <div class="metric-label">Estimativa · Jacobs</div>
-                </div>""")
-            with m4:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value" style="font-size:1.3rem">{dc}</div>
-                    <div class="metric-label">{fac} p/m² · densidade</div>
-                </div>""")
-            with m5:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value">{j.get('crowd_area_m2', '—')} m²</div>
-                    <div class="metric-label">Área detectada</div>
-                </div>""")
-            with m6:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value" style="color:{agr_color or '#fff'}">{agr_pct}</div>
-                    <div class="metric-label">Concordância CSRNet↔Jacobs</div>
-                </div>""")
+    if uploaded is not None and uploaded.name.lower().endswith(("mp4", "avi", "mov")):
+        _drone_meta = _cached_drone_meta(
+            uploaded.file_id, uploaded.getvalue(), Path(uploaded.name).suffix
+        )
+        if _drone_meta:
+            if "altitude_m" in _drone_meta:
+                st.sidebar.success(f"🛸 Altitude detectada: **{_drone_meta['altitude_m']} m**")
+            if "fov_deg" in _drone_meta:
+                st.sidebar.success(f"📷 FOV detectado: **{_drone_meta['fov_deg']}°**")
+        else:
+            st.sidebar.caption("ℹ️ Telemetria não encontrada no vídeo — use os valores manuais.")
 
-        if result["timeline"]:
-            df = pd.DataFrame(result["timeline"])
-            df = df.rename(columns={"time_s": "Tempo (s)", "count": "Pessoas estimadas"})
-            timeline_ph.line_chart(df.set_index("Tempo (s)")["Pessoas estimadas"])
+    with btn_col:
+        process_clicked = st.button("Analisar", type="primary", disabled=uploaded is None, use_container_width=True)
 
-        with download_ph.container():
-            dl1, dl2 = st.columns(2)
-            with dl1:
-                if Path(output_path).exists():
-                    st.download_button(
-                        "Download vídeo anotado",
-                        data=Path(output_path).read_bytes(),
-                        file_name="veridic_resultado.mp4",
-                        mime="video/mp4",
-                        use_container_width=True,
-                    )
-            with dl2:
-                if Path(heatmap_path).exists():
-                    st.download_button(
-                        "Download mapa de densidade",
-                        data=Path(heatmap_path).read_bytes(),
-                        file_name="veridic_heatmap.jpg",
-                        mime="image/jpeg",
-                        use_container_width=True,
-                    )
+    progress_ph = st.empty()
+    metrics_ph  = st.empty()
+    timeline_ph = st.empty()
+    download_ph = st.empty()
 
-            j = result.get("jacobs") or {}
-            _, agr_pct_vid = _agreement(result["peak_count"], j.get("jacobs_count"))
-            _ann = cv2.VideoCapture(output_path)
-            _ok, _frame = _ann.read()
-            _ann.release()
-            _ann_frame = _frame if _ok else np.zeros((360, 640, 3), dtype=np.uint8)
-            _heat_frame = cv2.imread(heatmap_path) or np.zeros((360, 640, 3), dtype=np.uint8)
-            pdf_bytes = generate_report(
-                event_name=event_name,
-                annotated_bgr=_ann_frame,
-                heatmap_bgr=_heat_frame,
-                csrnet_count=result["peak_count"],
-                jacobs_count=j.get("jacobs_count", 0),
-                crowd_area_m2=j.get("crowd_area_m2", 0),
-                density_class=j.get("density_class", "—"),
-                density_factor=j.get("density_factor", 0),
-                density_desc=j.get("density_desc", ""),
-                agreement_pct=agr_pct_vid,
-                camera_altitude=float(camera_altitude),
-                camera_fov=float(camera_fov),
-                sectors=j.get("sectors"),
-                is_video=True,
-                peak_count=result["peak_count"],
-                avg_count=result["avg_count"],
-                timeline=result.get("timeline"),
-            )
-            st.download_button(
-                "📄 Baixar relatório PDF",
-                data=pdf_bytes,
-                file_name="veridic_relatorio.pdf",
-                mime="application/pdf",
-                use_container_width=True,
-            )
-    else:
-        with st.spinner("Processando..."):
-            result = process_image(
-                image_path=input_path,
+    if process_clicked and uploaded is not None:
+        if not Path(weights_path).exists():
+            st.error(f"Pesos não encontrados: {weights_path}\nBaixe em: https://github.com/leeyeehoo/CSRNet-pytorch — coloque em weights/csrnet_sha.pth")
+            st.stop()
+
+        model = get_cached_model(weights_path)
+        is_video = uploaded.name.lower().endswith(("mp4", "avi", "mov"))
+        suffix = Path(uploaded.name).suffix
+        input_path  = save_upload(uploaded, suffix)
+        output_path = tmp_path(suffix if is_video else ".jpg")
+        heatmap_path = tmp_path(".jpg")
+
+        if is_video:
+            progress_bar = progress_ph.progress(0)
+
+            def on_progress(v):
+                progress_bar.progress(v)
+
+            def on_preview(frame, count, heatmap):
+                rgb_frame   = frame[:, :, ::-1]
+                rgb_heatmap = heatmap[:, :, ::-1]
+                with left_view.container():
+                    st.image(rgb_frame, channels="RGB", use_container_width=True)
+                with right_view.container():
+                    st.image(rgb_heatmap, channels="RGB", use_container_width=True)
+
+            result = process_video(
+                video_path=input_path,
                 model=model,
                 output_path=output_path,
                 heatmap_path=heatmap_path,
@@ -502,113 +392,468 @@ if process_clicked and uploaded is not None:
                 show_contours=show_contours,
                 contour_percentile=contour_percentile,
                 max_size=max_size,
+                sample_interval=sample_interval,
                 camera_altitude=float(camera_altitude),
                 camera_fov=float(camera_fov),
                 known_area_m2=float(known_area),
                 manual_densities=manual_densities,
+                progress_callback=on_progress,
+                preview_callback=on_preview,
             )
+            progress_bar.progress(1.0)
 
-        with left_view.container():
-            st.image(result["annotated"][:, :, ::-1], channels="RGB", use_container_width=True)
-        with right_view.container():
-            st.image(result["heatmap"][:, :, ::-1], channels="RGB", use_container_width=True)
+            with metrics_ph.container():
+                j = result.get("jacobs") or {}
+                jcount = j.get("jacobs_count")
+                agr_color, agr_pct = _agreement(result['peak_count'], jcount)
+                dc  = j.get('density_class', '—')
+                fac = j.get('density_factor', '')
 
-        with metrics_ph.container():
-            j = result.get("jacobs") or {}
-            jcount = j.get("jacobs_count")
-            agr_color, agr_pct = _agreement(result['count'], jcount)
-            dc  = j.get('density_class', '—')
-            fac = j.get('density_factor', '')
+                m1, m2, m3, m4, m5, m6 = st.columns(6)
+                with m1:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value">{result['peak_count']:,}</div>
+                        <div class="metric-label">Pico · CSRNet</div>
+                    </div>""")
+                with m2:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value">{result['avg_count']:,}</div>
+                        <div class="metric-label">Média · CSRNet</div>
+                    </div>""")
+                with m3:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value" style="color:#22f06b">{jcount:,}</div>
+                        <div class="metric-label">Estimativa · Jacobs</div>
+                    </div>""")
+                with m4:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value" style="font-size:1.3rem">{dc}</div>
+                        <div class="metric-label">{fac} p/m² · densidade</div>
+                    </div>""")
+                with m5:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value">{j.get('crowd_area_m2', '—')} m²</div>
+                        <div class="metric-label">Área detectada</div>
+                    </div>""")
+                with m6:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value" style="color:{agr_color or '#fff'}">{agr_pct}</div>
+                        <div class="metric-label">Concordância CSRNet↔Jacobs</div>
+                    </div>""")
 
-            m1, m2, m3, m4, m5 = st.columns(5)
-            with m1:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value">{result['count']:,}</div>
-                    <div class="metric-label">Estimativa · CSRNet</div>
-                </div>""")
-            with m2:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value" style="color:#22f06b">{jcount:,}</div>
-                    <div class="metric-label">Estimativa · Jacobs</div>
-                </div>""")
-            with m3:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value" style="font-size:1.3rem">{dc}</div>
-                    <div class="metric-label">{fac} p/m² · densidade</div>
-                </div>""")
-            with m4:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value">{j.get('crowd_area_m2', '—')} m²</div>
-                    <div class="metric-label">Área detectada</div>
-                </div>""")
-            with m5:
-                render_html(f"""
-                <div class="metric-box">
-                    <div class="metric-value" style="color:{agr_color or '#fff'}">{agr_pct}</div>
-                    <div class="metric-label">Concordância CSRNet↔Jacobs</div>
-                </div>""")
+            if result["timeline"]:
+                df = pd.DataFrame(result["timeline"])
+                df = df.rename(columns={"time_s": "Tempo (s)", "count": "Pessoas estimadas"})
+                timeline_ph.line_chart(df.set_index("Tempo (s)")["Pessoas estimadas"])
 
-            sectors = j.get("sectors", [])
-            if len(sectors) > 1:
-                st.markdown("**Densidade por setor (Jacobs)**")
-                rows = {}
-                for s in sectors:
-                    rows.setdefault(s["row"], []).append(s)
-                for row_sectors in rows.values():
-                    cols = st.columns(len(row_sectors))
-                    for col_widget, s in zip(cols, row_sectors):
-                        with col_widget:
-                            render_html(f"""
-                            <div class="metric-box">
-                                <div class="metric-value" style="font-size:1.1rem">{s['jacobs_count']:,}</div>
-                                <div class="metric-label">{s['density_class']} · {s['density_factor']} p/m²</div>
-                            </div>""")
+            with download_ph.container():
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    if Path(output_path).exists():
+                        st.download_button(
+                            "Download vídeo anotado",
+                            data=Path(output_path).read_bytes(),
+                            file_name="veridic_resultado.mp4",
+                            mime="video/mp4",
+                            use_container_width=True,
+                        )
+                with dl2:
+                    if Path(heatmap_path).exists():
+                        st.download_button(
+                            "Download mapa de densidade",
+                            data=Path(heatmap_path).read_bytes(),
+                            file_name="veridic_heatmap.jpg",
+                            mime="image/jpeg",
+                            use_container_width=True,
+                        )
 
-        with download_ph.container():
-            dl1, dl2 = st.columns(2)
-            with dl1:
+                j = result.get("jacobs") or {}
+                _, agr_pct_vid = _agreement(result["peak_count"], j.get("jacobs_count"))
+
+                _cap = cv2.VideoCapture(output_path)
+                _ok, _frame = _cap.read()
+                _cap.release()
+                _ann_frame = _frame if _ok else np.zeros((360, 640, 3), dtype=np.uint8)
+
+                _heat_read = cv2.imread(heatmap_path)
+                _heat_frame = _heat_read if _heat_read is not None else np.zeros((360, 640, 3), dtype=np.uint8)
+
+                pdf_bytes = generate_report(
+                    event_name=event_name,
+                    annotated_bgr=_ann_frame,
+                    heatmap_bgr=_heat_frame,
+                    csrnet_count=result["peak_count"],
+                    jacobs_count=j.get("jacobs_count", 0),
+                    crowd_area_m2=j.get("crowd_area_m2", 0),
+                    density_class=j.get("density_class", "—"),
+                    density_factor=j.get("density_factor", 0),
+                    density_desc=j.get("density_desc", ""),
+                    agreement_pct=agr_pct_vid,
+                    camera_altitude=float(camera_altitude),
+                    camera_fov=float(camera_fov),
+                    sectors=j.get("sectors"),
+                    is_video=True,
+                    peak_count=result["peak_count"],
+                    avg_count=result["avg_count"],
+                    timeline=result.get("timeline"),
+                )
                 st.download_button(
-                    "Download imagem anotada",
-                    data=Path(output_path).read_bytes(),
-                    file_name="veridic_resultado.jpg",
-                    mime="image/jpeg",
+                    "📄 Baixar relatório PDF",
+                    data=pdf_bytes,
+                    file_name="veridic_relatorio.pdf",
+                    mime="application/pdf",
                     use_container_width=True,
                 )
-            with dl2:
+        else:
+            with st.spinner("Processando..."):
+                result = process_image(
+                    image_path=input_path,
+                    model=model,
+                    output_path=output_path,
+                    heatmap_path=heatmap_path,
+                    show_zones=show_zones,
+                    zones_x=zones_x,
+                    zones_y=zones_y,
+                    show_contours=show_contours,
+                    contour_percentile=contour_percentile,
+                    max_size=max_size,
+                    camera_altitude=float(camera_altitude),
+                    camera_fov=float(camera_fov),
+                    known_area_m2=float(known_area),
+                    manual_densities=manual_densities,
+                )
+
+            with left_view.container():
+                st.image(result["annotated"][:, :, ::-1], channels="RGB", use_container_width=True)
+            with right_view.container():
+                st.image(result["heatmap"][:, :, ::-1], channels="RGB", use_container_width=True)
+
+            with metrics_ph.container():
+                j = result.get("jacobs") or {}
+                jcount = j.get("jacobs_count")
+                agr_color, agr_pct = _agreement(result['count'], jcount)
+                dc  = j.get('density_class', '—')
+                fac = j.get('density_factor', '')
+
+                m1, m2, m3, m4, m5 = st.columns(5)
+                with m1:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value">{result['count']:,}</div>
+                        <div class="metric-label">Estimativa · CSRNet</div>
+                    </div>""")
+                with m2:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value" style="color:#22f06b">{jcount:,}</div>
+                        <div class="metric-label">Estimativa · Jacobs</div>
+                    </div>""")
+                with m3:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value" style="font-size:1.3rem">{dc}</div>
+                        <div class="metric-label">{fac} p/m² · densidade</div>
+                    </div>""")
+                with m4:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value">{j.get('crowd_area_m2', '—')} m²</div>
+                        <div class="metric-label">Área detectada</div>
+                    </div>""")
+                with m5:
+                    render_html(f"""
+                    <div class="metric-box">
+                        <div class="metric-value" style="color:{agr_color or '#fff'}">{agr_pct}</div>
+                        <div class="metric-label">Concordância CSRNet↔Jacobs</div>
+                    </div>""")
+
+                sectors = j.get("sectors", [])
+                if len(sectors) > 1:
+                    st.markdown("**Densidade por setor (Jacobs)**")
+                    rows = {}
+                    for s in sectors:
+                        rows.setdefault(s["row"], []).append(s)
+                    for row_sectors in rows.values():
+                        cols = st.columns(len(row_sectors))
+                        for col_widget, s in zip(cols, row_sectors):
+                            with col_widget:
+                                render_html(f"""
+                                <div class="metric-box">
+                                    <div class="metric-value" style="font-size:1.1rem">{s['jacobs_count']:,}</div>
+                                    <div class="metric-label">{s['density_class']} · {s['density_factor']} p/m²</div>
+                                </div>""")
+
+            with download_ph.container():
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    st.download_button(
+                        "Download imagem anotada",
+                        data=Path(output_path).read_bytes(),
+                        file_name="veridic_resultado.jpg",
+                        mime="image/jpeg",
+                        use_container_width=True,
+                    )
+                with dl2:
+                    st.download_button(
+                        "Download mapa de densidade",
+                        data=Path(heatmap_path).read_bytes(),
+                        file_name="veridic_heatmap.jpg",
+                        mime="image/jpeg",
+                        use_container_width=True,
+                    )
+
+                j = result.get("jacobs") or {}
+                _, agr_pct_img = _agreement(result["count"], j.get("jacobs_count"))
+                pdf_bytes = generate_report(
+                    event_name=event_name,
+                    annotated_bgr=result["annotated"],
+                    heatmap_bgr=result["heatmap"],
+                    csrnet_count=result["count"],
+                    jacobs_count=j.get("jacobs_count", 0),
+                    crowd_area_m2=j.get("crowd_area_m2", 0),
+                    density_class=j.get("density_class", "—"),
+                    density_factor=j.get("density_factor", 0),
+                    density_desc=j.get("density_desc", ""),
+                    agreement_pct=agr_pct_img,
+                    camera_altitude=float(camera_altitude),
+                    camera_fov=float(camera_fov),
+                    sectors=j.get("sectors"),
+                    is_video=False,
+                )
                 st.download_button(
-                    "Download mapa de densidade",
-                    data=Path(heatmap_path).read_bytes(),
-                    file_name="veridic_heatmap.jpg",
-                    mime="image/jpeg",
+                    "📄 Baixar relatório PDF",
+                    data=pdf_bytes,
+                    file_name="veridic_relatorio.pdf",
+                    mime="application/pdf",
                     use_container_width=True,
                 )
 
-            j = result.get("jacobs") or {}
-            _, agr_pct_img = _agreement(result["count"], j.get("jacobs_count"))
-            pdf_bytes = generate_report(
-                event_name=event_name,
-                annotated_bgr=result["annotated"],
-                heatmap_bgr=result["heatmap"],
-                csrnet_count=result["count"],
-                jacobs_count=j.get("jacobs_count", 0),
-                crowd_area_m2=j.get("crowd_area_m2", 0),
-                density_class=j.get("density_class", "—"),
-                density_factor=j.get("density_factor", 0),
-                density_desc=j.get("density_desc", ""),
-                agreement_pct=agr_pct_img,
-                camera_altitude=float(camera_altitude),
-                camera_fov=float(camera_fov),
-                sectors=j.get("sectors"),
-                is_video=False,
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 2 — Jacobs real (contagem manual por grade)
+# ══════════════════════════════════════════════════════════════════════════════
+with tab2:
+    render_html("""
+    <div style="margin-bottom:0.75rem;">
+        <span style="font-size:1.1rem;font-weight:800;">Método de Jacobs — contagem manual por grade</span><br>
+        <span style="font-size:0.82rem;color:#93a4bd;">
+            Faça upload de uma foto tirada pelo drone diretamente acima do público.
+            A grade é desenhada sobre a imagem. Conte as pessoas visualmente em células representativas
+            e registre abaixo. O app extrapola para toda a área com intervalo de confiança de 95%.
+        </span>
+    </div>
+    """)
+
+    # ── upload ────────────────────────────────────────────────────────────────
+    j2_uploaded = st.file_uploader(
+        "Foto do drone (imagem estática)",
+        type=("jpg", "jpeg", "png"),
+        key="jacobs_real_upload",
+        label_visibility="collapsed",
+    )
+
+    if j2_uploaded is None:
+        render_html("""
+        <div style="text-align:center;padding:3rem;color:#93a4bd;border:1px dashed rgba(106,132,173,0.3);border-radius:8px;">
+            📸 Faça upload de uma foto do drone acima do público para começar.
+        </div>
+        """)
+    else:
+        raw_bytes = j2_uploaded.getvalue()
+        file_bytes = np.frombuffer(raw_bytes, np.uint8)
+        j2_image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        # hash do conteúdo — garante reset do editor quando a imagem muda,
+        # mesmo que as dimensões da grade permaneçam iguais
+        _file_hash = hashlib.md5(raw_bytes).hexdigest()[:8]
+
+        if j2_image is None:
+            st.error("Não foi possível abrir a imagem.")
+        else:
+            # ── configuração ──────────────────────────────────────────────────
+            cfg1, cfg2, cfg3, cfg4, cfg5 = st.columns([1, 1, 1, 1, 2])
+            with cfg1:
+                j2_cols = int(st.number_input("Colunas da grade", min_value=2, max_value=20, value=8, key="j2_cols"))
+            with cfg2:
+                j2_rows = int(st.number_input("Linhas da grade", min_value=2, max_value=20, value=6, key="j2_rows"))
+            with cfg3:
+                j2_altitude = st.number_input("Altitude (m)", min_value=5, max_value=300, value=50, key="j2_alt",
+                                              help="Usado para calcular a área coberta por cada célula.")
+            with cfg4:
+                j2_fov = st.number_input("FOV horizontal (°)", min_value=40.0, max_value=150.0, value=82.1,
+                                         key="j2_fov")
+            with cfg5:
+                j2_event = st.text_input("Nome do evento", value="Evento", key="j2_event_name")
+
+            # área por célula
+            img_h, img_w = j2_image.shape[:2]
+            ground_w = 2 * j2_altitude * math.tan(math.radians(j2_fov / 2))
+            ground_h = ground_w * (img_h / img_w)
+            cell_area_m2 = (ground_w / j2_cols) * (ground_h / j2_rows)
+            total_cells = j2_rows * j2_cols
+
+            st.caption(
+                f"📐 Cobertura total: **{ground_w:.1f}m × {ground_h:.1f}m** — "
+                f"cada célula cobre **≈ {cell_area_m2:.1f} m²** "
+                f"({j2_rows}×{j2_cols} = {total_cells} células)"
             )
-            st.download_button(
-                "📄 Baixar relatório PDF",
-                data=pdf_bytes,
-                file_name="veridic_relatorio.pdf",
-                mime="application/pdf",
-                use_container_width=True,
+            st.warning(
+                "A foto deve ser tirada com o drone **diretamente acima do público** (nadir). "
+                "Em fotos inclinadas, as células mais distantes cobrem áreas maiores no solo — "
+                "a contagem fica enviesada e a extrapolação perde validade.",
+                icon="⚠️",
             )
+
+            st.markdown("")
+
+            # ── layout: imagem | tabela ───────────────────────────────────────
+            img_col, tbl_col = st.columns([3, 2], gap="large")
+
+            # placeholder para a imagem — será preenchida APÓS a leitura do editor
+            with img_col:
+                img_placeholder = st.empty()
+
+            with tbl_col:
+                st.markdown("**Contagem por célula**")
+                render_html("""
+                <div style="font-size:0.78rem;color:#93a4bd;margin-bottom:0.5rem;">
+                    <span class="legend-dot" style="background:#22f06b;"></span>amostrada &nbsp;
+                    <span class="legend-dot" style="background:#3333cc;"></span>excluída (palco, saída, vazio)
+                    <br>Deixe <em>Contagem</em> em branco nas células não amostradas —
+                    o app usa a média das amostradas para extrapolar.
+                </div>
+                """)
+
+                # chave inclui hash do arquivo: troca de imagem sempre reseta o editor
+                editor_key = f"j2_editor_{j2_rows}_{j2_cols}_{_file_hash}"
+
+                _rows_data = []
+                for r in range(j2_rows):
+                    for c in range(j2_cols):
+                        _rows_data.append({
+                            "Célula": r * j2_cols + c + 1,
+                            "Contagem": pd.NA,
+                            "Excluída": False,
+                        })
+                _base_df = pd.DataFrame(_rows_data).astype({"Contagem": pd.Int64Dtype()})
+
+                edited_df = st.data_editor(
+                    _base_df,
+                    key=editor_key,
+                    column_config={
+                        "Célula": st.column_config.NumberColumn("Célula", disabled=True, width="small"),
+                        "Contagem": st.column_config.NumberColumn(
+                            "Contagem", min_value=0, step=1, width="medium",
+                            help="Número de pessoas contadas visualmente nesta célula.",
+                        ),
+                        "Excluída": st.column_config.CheckboxColumn(
+                            "Excluída", width="small",
+                            help="Marque células sem público (palco, área livre, saída).",
+                        ),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                    height=min(500, total_cells * 36 + 40),
+                )
+
+            # ── atualiza imagem com highlights baseados no editor ─────────────
+            sampled_set  = set(edited_df[~edited_df["Excluída"] & edited_df["Contagem"].notna()]["Célula"].tolist())
+            excluded_set = set(edited_df[edited_df["Excluída"]]["Célula"].tolist())
+
+            grid_img = draw_jacobs_grid(j2_image, j2_rows, j2_cols, sampled_set, excluded_set)
+            with img_placeholder:
+                st.image(grid_img[:, :, ::-1], channels="RGB", use_container_width=True)
+
+            # ── cálculo da estimativa ─────────────────────────────────────────
+            sampled_rows  = edited_df[~edited_df["Excluída"] & edited_df["Contagem"].notna()]
+            sampled_counts = [int(x) for x in sampled_rows["Contagem"].tolist()]
+            excluded_count = int(edited_df["Excluída"].sum())
+
+            st.markdown("")
+
+            if not sampled_counts:
+                render_html("""
+                <div style="padding:1rem;color:#93a4bd;border:1px dashed rgba(106,132,173,0.3);border-radius:8px;text-align:center;">
+                    Preencha a contagem de pelo menos uma célula para ver a estimativa.
+                </div>
+                """)
+            else:
+                est = jacobs_estimate(sampled_counts, excluded_count, total_cells)
+
+                if est is None:
+                    st.warning("Todas as células estão excluídas — não há área de público para estimar.")
+                else:
+                    # resultado principal
+                    render_html(f"""
+                    <div class="jacobs-result">
+                        <div style="font-size:0.85rem;color:#93a4bd;font-weight:700;margin-bottom:0.25rem;">
+                            ESTIMATIVA JACOBS REAL
+                        </div>
+                        <div class="jacobs-estimate">{est['estimate']:,}</div>
+                        <div class="jacobs-ci">
+                            ± {est['margin']:,} pessoas &nbsp;·&nbsp;
+                            intervalo [{est['lower']:,} — {est['upper']:,}]
+                            &nbsp;<span title="Válido somente se as células foram escolhidas de forma representativa (aleatória ou sistemática). Seleção por conveniência pode introduzir viés não capturado por este intervalo." style="cursor:help;border-bottom:1px dotted #93a4bd;">⚠ premissa de representatividade</span>
+                        </div>
+                    </div>
+                    """)
+
+                    st.markdown("")
+
+                    # métricas de qualidade da amostra
+                    s1, s2, s3, s4, s5 = st.columns(5)
+                    with s1:
+                        render_html(f"""
+                        <div class="metric-box">
+                            <div class="metric-value" style="font-size:1.6rem">{est['sampled_cells']}</div>
+                            <div class="metric-label">Células amostradas</div>
+                        </div>""")
+                    with s2:
+                        render_html(f"""
+                        <div class="metric-box">
+                            <div class="metric-value" style="font-size:1.6rem">{est['crowd_cells']}</div>
+                            <div class="metric-label">Células de público</div>
+                        </div>""")
+                    with s3:
+                        render_html(f"""
+                        <div class="metric-box">
+                            <div class="metric-value" style="font-size:1.6rem">{est['coverage_pct']}%</div>
+                            <div class="metric-label">Cobertura da amostra</div>
+                        </div>""")
+                    with s4:
+                        render_html(f"""
+                        <div class="metric-box">
+                            <div class="metric-value" style="font-size:1.6rem">{est['avg_per_cell']}</div>
+                            <div class="metric-label">Média por célula</div>
+                        </div>""")
+                    with s5:
+                        std_display = est['std_per_cell'] if est['std_per_cell'] is not None else "—"
+                        render_html(f"""
+                        <div class="metric-box">
+                            <div class="metric-value" style="font-size:1.6rem">{std_display}</div>
+                            <div class="metric-label">Desvio padrão / célula</div>
+                        </div>""")
+
+                    # aviso de qualidade da amostra
+                    if est["sampled_cells"] < 5:
+                        st.warning(
+                            f"Amostra pequena ({est['sampled_cells']} célula{'s' if est['sampled_cells'] > 1 else ''}). "
+                            "Recomenda-se amostrar pelo menos 5–10 células distribuídas pela área para reduzir a margem de erro."
+                        )
+                    elif est["coverage_pct"] >= 30:
+                        st.success(
+                            f"Boa cobertura ({est['coverage_pct']}% das células de público amostradas). "
+                            "Estimativa confiável."
+                        )
+
+                    # densidade implícita
+                    if cell_area_m2 > 0 and est["avg_per_cell"] > 0:
+                        density = est["avg_per_cell"] / cell_area_m2
+                        st.caption(
+                            f"Densidade implícita: **{density:.2f} p/m²** "
+                            f"({est['avg_per_cell']:.1f} pessoas / {cell_area_m2:.1f} m² por célula)"
+                        )
