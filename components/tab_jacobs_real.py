@@ -108,48 +108,46 @@ def render_tab_jacobs_real(config):
     """)
 
     excl_locked = st.session_state[f"{_sk}_excl_locked"]
-    ph_excl_img = st.empty()
 
     if not excl_locked:
         st.info("👆 Desenhe na imagem abaixo para pintar as células vazias/excluídas (palco, área técnica...).", icon="🖌️")
         
-        with ph_excl_img:
-            _g = draw_jacobs_grid(j2_image, j2_rows, j2_cols, st.session_state[f"{_sk}_sampled"], set())
+        _g = draw_jacobs_grid(j2_image, j2_rows, j2_cols, st.session_state[f"{_sk}_sampled"], set())
+        
+        h_orig, w_orig = _g.shape[:2]
+        scale = min(1.0, 800 / w_orig)
+        new_w, new_h = int(w_orig * scale), int(h_orig * scale)
+        _g_resized = cv2.resize(_g, (new_w, new_h))
+        
+        pil_img = Image.fromarray(_g_resized[:, :, ::-1])
+        
+        canvas_result = st_canvas(
+            fill_color="rgba(255, 56, 92, 0.4)",
+            stroke_width=20,
+            stroke_color="rgba(255, 56, 92, 0.6)",
+            background_image=pil_img,
+            update_streamlit=True,
+            height=new_h,
+            width=new_w,
+            drawing_mode="freedraw",
+            key=f"{_sk}_canvas",
+        )
+        
+        if canvas_result.image_data is not None:
+            alpha = canvas_result.image_data[:, :, 3]
+            ch, cw = alpha.shape
             
-            h_orig, w_orig = _g.shape[:2]
-            scale = min(1.0, 800 / w_orig)
-            new_w, new_h = int(w_orig * scale), int(h_orig * scale)
-            _g_resized = cv2.resize(_g, (new_w, new_h))
+            new_excl = set()
+            for r in range(j2_rows):
+                for c in range(j2_cols):
+                    y1, y2 = r * ch // j2_rows, (r + 1) * ch // j2_rows
+                    x1, x2 = c * cw // j2_cols, (c + 1) * cw // j2_cols
+                    cell_alpha = alpha[y1:y2, x1:x2]
+                    if np.any(cell_alpha > 0):
+                        cell_num = r * j2_cols + c + 1
+                        new_excl.add(cell_num)
             
-            pil_img = Image.fromarray(_g_resized[:, :, ::-1])
-            
-            canvas_result = st_canvas(
-                fill_color="rgba(255, 56, 92, 0.4)",
-                stroke_width=20,
-                stroke_color="rgba(255, 56, 92, 0.6)",
-                background_image=pil_img,
-                update_streamlit=True,
-                height=new_h,
-                width=new_w,
-                drawing_mode="freedraw",
-                key=f"{_sk}_canvas",
-            )
-            
-            if canvas_result.image_data is not None:
-                alpha = canvas_result.image_data[:, :, 3]
-                ch, cw = alpha.shape
-                
-                new_excl = set()
-                for r in range(j2_rows):
-                    for c in range(j2_cols):
-                        y1, y2 = r * ch // j2_rows, (r + 1) * ch // j2_rows
-                        x1, x2 = c * cw // j2_cols, (c + 1) * cw // j2_cols
-                        cell_alpha = alpha[y1:y2, x1:x2]
-                        if np.any(cell_alpha > 0):
-                            cell_num = r * j2_cols + c + 1
-                            new_excl.add(cell_num)
-                
-                st.session_state[f"{_sk}_excl"] = new_excl
+            st.session_state[f"{_sk}_excl"] = new_excl
 
         if st.button("Confirmar exclusões e realizar sorteio", type="primary", use_container_width=True):
             crowd_pool = [i for i in range(1, total_cells + 1) if i not in st.session_state[f"{_sk}_excl"]]
@@ -169,9 +167,8 @@ def render_tab_jacobs_real(config):
             st.session_state[f"{_sk}_seed"] = None
             st.rerun()
         
-        with ph_excl_img:
-            _g = draw_jacobs_grid(j2_image, j2_rows, j2_cols, st.session_state[f"{_sk}_sampled"], st.session_state[f"{_sk}_excl"])
-            st.image(_g[:, :, ::-1], channels="RGB", use_container_width=True)
+        _g = draw_jacobs_grid(j2_image, j2_rows, j2_cols, st.session_state[f"{_sk}_sampled"], st.session_state[f"{_sk}_excl"])
+        st.image(_g[:, :, ::-1], channels="RGB", use_container_width=True)
 
     sampled = st.session_state[f"{_sk}_sampled"]
     seed    = st.session_state[f"{_sk}_seed"]
