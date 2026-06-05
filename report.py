@@ -190,7 +190,7 @@ class _Report(FPDF):
                 self.set_text_color(*_BLACK)
                 self.set_xy(x, ry)
                 self.cell(28, row_h, str(cell_num), border="LR", fill=fill, align="C")
-                val = _n(count) if count is not None else "—"
+                val = _n(count) if count is not None else "-"
                 self.cell(col_w - 28, row_h, val, border="LR", fill=fill, align="C")
             # bottom border
             last_y = y0 + hdr_h + len(pairs) * row_h
@@ -251,10 +251,10 @@ def generate_report(
 
     # metodologia
     pdf.section("Metodologia")
-    pdf.kv("Metodo primario",   "Jacobs — area x fator de densidade")
-    pdf.kv("Metodo secundario", "CSRNet — mapa de densidade neural")
+    pdf.kv("Metodo primario",   "Jacobs - area x fator de densidade")
+    pdf.kv("Metodo secundario", "CSRNet - mapa de densidade neural")
     pdf.kv("Area detectada",    f"{crowd_area_m2:,.0f} m2".replace(",", "."))
-    pdf.kv("Classificacao de densidade", f"{density_class} ({density_factor} p/m2) — {density_desc}")
+    pdf.kv("Classificacao de densidade", f"{density_class} ({density_factor} p/m2) - {density_desc}")
     pdf.kv("Altitude do drone", f"{camera_altitude} m")
     pdf.kv("FOV horizontal",    f"{camera_fov} graus")
     pdf.divider()
@@ -269,7 +269,7 @@ def generate_report(
         for row_idx in sorted(row_groups):
             for s in sorted(row_groups[row_idx], key=lambda x: x["col"]):
                 label = f"Setor linha {s['row']+1} col {s['col']+1}"
-                value = f"{_n(s['jacobs_count'])} pessoas — {s['density_class']} ({s['density_factor']} p/m2)"
+                value = f"{_n(s['jacobs_count'])} pessoas - {s['density_class']} ({s['density_factor']} p/m2)"
                 pdf.kv(label, value, indent=4)
         pdf.divider()
 
@@ -307,7 +307,7 @@ def generate_report(
     pdf.cell(
         170, 4,
         "Esquerda: contornos de densidade (CSRNet). "
-        "Direita: mapa de calor — vermelho = alta densidade, azul = baixa densidade.",
+        "Direita: mapa de calor - vermelho = alta densidade, azul = baixa densidade.",
     )
 
     Path(ann_path).unlink(missing_ok=True)
@@ -340,17 +340,18 @@ def generate_jacobs_report(
     grid_image_bgr: np.ndarray,
     ground_w: float,
     ground_h: float,
+    heatmap_bgr: np.ndarray | None = None,
 ) -> bytes:
 
     now = datetime.now().strftime("%d/%m/%Y  %H:%M")
-    pdf = _Report(event_name, now, subtitle="Jacobs real — sorteio aleatorio")
+    pdf = _Report(event_name, now, subtitle="Jacobs real - sorteio aleatorio")
     pdf.add_page()
 
     # identificacao
     pdf.section("Identificacao do Evento")
     pdf.kv("Evento",      event_name, bold=True)
     pdf.kv("Data / Hora", now)
-    pdf.kv("Metodo",      "Jacobs real — contagem manual por grade com sorteio aleatorio")
+    pdf.kv("Metodo",      "Jacobs real - contagem manual por grade com sorteio aleatorio")
     pdf.divider()
 
     # resultado principal
@@ -378,7 +379,7 @@ def generate_jacobs_report(
     # estatisticas
     pdf.section("Estatisticas da Amostra")
     pdf.kv("Media por celula",     f"{avg_per_cell:.1f} pessoas")
-    pdf.kv("Desvio padrao",        f"{std_per_cell:.1f} pessoas" if std_per_cell is not None else "—  (amostra unica)")
+    pdf.kv("Desvio padrao",        f"{std_per_cell:.1f} pessoas" if std_per_cell is not None else "n/a (amostra unica)")
     if cell_area_m2 > 0 and avg_per_cell > 0:
         density = avg_per_cell / cell_area_m2
         pdf.kv("Densidade implicita",  f"{density:.2f} p/m2")
@@ -401,7 +402,7 @@ def generate_jacobs_report(
         "O intervalo reportado e calculado via distribuicao t de Student com correcao para "
         "populacao finita (FPC), que reduz a margem proporcionalmente a cobertura da amostra. "
         "A validade estatistica do intervalo pressupoe que as celulas foram sorteadas antes "
-        "da contagem — o codigo de auditoria permite verificar essa condicao."
+        "da contagem - o codigo de auditoria permite verificar essa condicao."
     )
     pdf.divider()
 
@@ -409,39 +410,86 @@ def generate_jacobs_report(
     pdf.section("Contagem por Celula Sorteada")
     pdf.cells_table(sampled_cells, cell_counts)
 
-    # imagem com grade
+    # imagem com grade + mapa de calor
     if grid_image_bgr is not None:
-        pdf.section("Evidencia Visual — Foto com Grade")
+        pdf.section("Evidencia Visual")
 
-        img_path = _tmp_jpg(grid_image_bgr, quality=88)
-        ratio    = grid_image_bgr.shape[1] / grid_image_bgr.shape[0]
+        ratio = grid_image_bgr.shape[1] / grid_image_bgr.shape[0]
+        has_heatmap = heatmap_bgr is not None
 
-        available_h = 280 - pdf.get_y() - 10
-        img_h = min(available_h, 90)
-        img_w = min(int(img_h * ratio), 170)
-        img_h = int(img_w / ratio)
+        if has_heatmap:
+            # side-by-side: grid left, heatmap right
+            available_h = 280 - pdf.get_y() - 14
+            img_h = min(available_h, 72)
+            max_w = 82
+            img_w = min(int(img_h * ratio), max_w)
+            img_h = int(img_w / ratio)
+            gap = 6
 
-        if img_h < 20:
-            pdf.add_page()
-            img_h = 90
+            if img_h < 20:
+                pdf.add_page()
+                img_h = 72
+                img_w = min(int(img_h * ratio), max_w)
+                img_h = int(img_w / ratio)
+
+            grid_path = _tmp_jpg(grid_image_bgr, quality=88)
+            heat_path = _tmp_jpg(heatmap_bgr, quality=88)
+
+            pdf.set_font("Helvetica", "B", 7)
+            pdf.set_text_color(*_GRAY)
+            pdf.set_x(20)
+            pdf.cell(img_w, 4, "Grade com sorteio", align="C")
+            pdf.set_x(20 + img_w + gap)
+            pdf.cell(img_w, 4, "Mapa de calor - densidade", align="C")
+            pdf.ln(4)
+
+            iy = pdf.get_y()
+            pdf.set_draw_color(*_LGRAY)
+            pdf.rect(20, iy, img_w, img_h)
+            pdf.rect(20 + img_w + gap, iy, img_w, img_h)
+            pdf.image(grid_path, 20, iy, img_w, img_h)
+            pdf.image(heat_path, 20 + img_w + gap, iy, img_w, img_h)
+            pdf.ln(img_h + 4)
+
+            pdf.set_font("Helvetica", "I", 6.5)
+            pdf.set_text_color(*_GRAY)
+            pdf.set_x(20)
+            pdf.cell(
+                170, 4,
+                "Esquerda: celulas sorteadas (verde) e excluidas (azul). "
+                "Direita: mapa de calor - vermelho = alta densidade, azul = baixa, "
+                "tom fraco = celulas nao contadas (media estimada).",
+            )
+
+            Path(grid_path).unlink(missing_ok=True)
+            Path(heat_path).unlink(missing_ok=True)
+        else:
+            available_h = 280 - pdf.get_y() - 10
+            img_h = min(available_h, 90)
             img_w = min(int(img_h * ratio), 170)
             img_h = int(img_w / ratio)
 
-        iy = pdf.get_y()
-        pdf.set_draw_color(*_LGRAY)
-        pdf.rect(20, iy, img_w, img_h)
-        pdf.image(img_path, 20, iy, img_w, img_h)
-        pdf.ln(img_h + 4)
+            if img_h < 20:
+                pdf.add_page()
+                img_h = 90
+                img_w = min(int(img_h * ratio), 170)
+                img_h = int(img_w / ratio)
 
-        pdf.set_font("Helvetica", "I", 6.5)
-        pdf.set_text_color(*_GRAY)
-        pdf.set_x(20)
-        pdf.cell(
-            170, 4,
-            "Verde: celulas contadas. Azul escuro: celulas excluidas. "
-            "Celulas sem cor: nao sorteadas (extrapoladas pela media).",
-        )
+            img_path = _tmp_jpg(grid_image_bgr, quality=88)
+            iy = pdf.get_y()
+            pdf.set_draw_color(*_LGRAY)
+            pdf.rect(20, iy, img_w, img_h)
+            pdf.image(img_path, 20, iy, img_w, img_h)
+            pdf.ln(img_h + 4)
 
-        Path(img_path).unlink(missing_ok=True)
+            pdf.set_font("Helvetica", "I", 6.5)
+            pdf.set_text_color(*_GRAY)
+            pdf.set_x(20)
+            pdf.cell(
+                170, 4,
+                "Verde: celulas contadas. Azul escuro: celulas excluidas. "
+                "Celulas sem cor: nao sorteadas (extrapoladas pela media).",
+            )
+            Path(img_path).unlink(missing_ok=True)
 
     return bytes(pdf.output())
