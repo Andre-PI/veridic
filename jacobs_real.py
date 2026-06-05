@@ -75,74 +75,100 @@ def _t_critical(df: int) -> float:
 
 def draw_jacobs_heatmap(image_bgr, rows, cols, cell_counts, avg_per_cell, excluded_cells=None):
     """
-    Density heatmap overlay. cell_counts: {cell_num: int} for counted cells.
-    Counted cells are colored by count (blue→red). Unsampled crowd cells show
-    the estimated avg at very low opacity. Excluded cells get a dark overlay.
+    Smooth Gaussian-interpolated heatmap (Jet colormap, blended over the photo).
+    Counted cells drive the gradient; unsampled cells use avg; excluded cells are
+    darkened. Looks similar to CSRNet density maps.
     """
     excluded_cells = excluded_cells or set()
     img = image_bgr.copy()
     h, w = img.shape[:2]
 
     all_counts = [v for v in cell_counts.values() if v is not None]
-    max_count = max(all_counts) if all_counts else 1
+    if not all_counts:
+        return img
 
-    def _heat_color(count):
-        norm = min(count / max_count, 1.0) if max_count > 0 else 0.0
-        # blue → cyan → green → yellow → red
-        if norm < 0.25:
-            t = norm / 0.25
-            r, g, b = 0, int(t * 255), 255
-        elif norm < 0.5:
-            t = (norm - 0.25) / 0.25
-            r, g, b = 0, 255, int((1 - t) * 255)
-        elif norm < 0.75:
-            t = (norm - 0.5) / 0.25
-            r, g, b = int(t * 255), 255, 0
-        else:
-            t = (norm - 0.75) / 0.25
-            r, g, b = 255, int((1 - t) * 255), 0
-        return (b, g, r)  # BGR
+    lo, hi = min(all_counts), max(all_counts)
 
-    overlay = img.copy()
+    # Build a low-res density grid (rows × cols)
+    grid = np.full((rows, cols), avg_per_cell, dtype=np.float32)
+    excl_mask_lr = np.zeros((rows, cols), dtype=np.float32)
     cell_num = 1
-    for row in range(rows):
-        for col in range(cols):
-            y1, y2 = row * h // rows, (row + 1) * h // rows
-            x1, x2 = col * w // cols, (col + 1) * w // cols
+    for r in range(rows):
+        for c in range(cols):
             if cell_num in excluded_cells:
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), (10, 10, 10), -1)
-                alpha = 0.65
+                grid[r, c] = 0.0
+                excl_mask_lr[r, c] = 1.0
             elif cell_num in cell_counts:
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), _heat_color(cell_counts[cell_num]), -1)
-                alpha = 0.55
-            else:
-                cv2.rectangle(overlay, (x1, y1), (x2, y2), _heat_color(avg_per_cell), -1)
-                alpha = 0.20
-            roi = img[y1:y2, x1:x2]
-            cv2.addWeighted(overlay[y1:y2, x1:x2], alpha, roi, 1 - alpha, 0, roi)
+                grid[r, c] = float(cell_counts[cell_num])
             cell_num += 1
 
-    for r in range(rows + 1):
-        cv2.line(img, (0, r * h // rows), (w, r * h // rows), (160, 160, 160), 1, cv2.LINE_AA)
-    for c in range(cols + 1):
-        cv2.line(img, (c * w // cols, 0), (c * w // cols, h), (160, 160, 160), 1, cv2.LINE_AA)
+    # Upscale grid and exclusion mask to image size with smooth interpolation
+    grid_up = cv2.resize(grid, (w, h), interpolation=cv2.INTER_CUBIC)
+    excl_up = cv2.resize(excl_mask_lr, (w, h), interpolation=cv2.INTER_NEAREST)
 
+    # Gaussian blur for smooth gradients — sigma ≈ 1.5 cell widths
+    sigma = max(w // cols, h // rows) * 1.5
+    ksize = int(sigma * 3) | 1
+    grid_blur = cv2.GaussianBlur(grid_up, (ksize, ksize), sigma)
+
+    # Normalize to 0–255 and apply Jet colormap (blue=low, red=high)
+    gmin, gmax = grid_blur.min(), grid_blur.max()
+    if gmax > gmin:
+        norm8 = ((grid_blur - gmin) / (gmax - gmin) * 255).astype(np.uint8)
+    else:
+        norm8 = np.full((h, w), 128, dtype=np.uint8)
+
+    colored = cv2.applyColorMap(norm8, cv2.COLORMAP_JET)
+
+    # Blend: heatmap 65% + original 35%
+    blended = cv2.addWeighted(colored, 0.65, img, 0.35, 0)
+
+    # Darken excluded zones (use dark original)
+    dark = (img * 0.25).astype(np.uint8)
+    mask3 = np.stack([excl_up, excl_up, excl_up], axis=2).astype(np.uint8)
+    result = np.where(mask3, dark, blended).astype(np.uint8)
+
+    # Grid lines
+    for r in range(rows + 1):
+        cv2.line(result, (0, r * h // rows), (w, r * h // rows), (200, 200, 200), 1, cv2.LINE_AA)
+    for c in range(cols + 1):
+        cv2.line(result, (c * w // cols, 0), (c * w // cols, h), (200, 200, 200), 1, cv2.LINE_AA)
+
+    # Count labels on counted cells
     font = cv2.FONT_HERSHEY_SIMPLEX
     fs = max(0.28, min(0.55, min(w // cols, h // rows) / 80))
     cell_num = 1
-    for row in range(rows):
-        for col in range(cols):
+    for r in range(rows):
+        for c in range(cols):
             if cell_num in cell_counts:
-                y1, y2 = row * h // rows, (row + 1) * h // rows
-                x1, x2 = col * w // cols, (col + 1) * w // cols
+                y1, y2 = r * h // rows, (r + 1) * h // rows
+                x1, x2 = c * w // cols, (c + 1) * w // cols
                 cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
                 label = str(cell_counts[cell_num])
                 (tw, th), _ = cv2.getTextSize(label, font, fs, 1)
-                cv2.rectangle(img, (cx - tw // 2 - 2, cy - th - 2), (cx + tw // 2 + 2, cy + 2), (0, 0, 0), -1)
-                cv2.putText(img, label, (cx - tw // 2, cy), font, fs, (255, 255, 255), 1, cv2.LINE_AA)
+                tx, ty = cx - tw // 2, cy + th // 2
+                cv2.putText(result, label, (tx, ty), font, fs, (0, 0, 0), 3, cv2.LINE_AA)
+                cv2.putText(result, label, (tx, ty), font, fs, (255, 255, 255), 1, cv2.LINE_AA)
             cell_num += 1
 
-    return img
+    # Vertical legend bar (right side, like CSRNet heatmap)
+    bar_h = min(h - 20, int(h * 0.6))
+    bar_w = max(14, w // 40)
+    bar_x, bar_y = w - bar_w - 8, (h - bar_h) // 2
+    strip = np.arange(255, -1, -255 / bar_h, dtype=np.float32)[:bar_h].astype(np.uint8)
+    strip_img = np.repeat(strip.reshape(-1, 1), bar_w, axis=1)
+    bar_colored = cv2.applyColorMap(strip_img, cv2.COLORMAP_JET)
+    result[bar_y:bar_y + bar_h, bar_x:bar_x + bar_w] = bar_colored
+    cv2.rectangle(result, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), (220, 220, 220), 1)
+
+    lfs = max(0.28, bar_w / 22)
+    lx = bar_x - bar_w - 2
+    cv2.putText(result, str(hi), (lx, bar_y + 10), font, lfs, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(result, str(hi), (lx, bar_y + 10), font, lfs, (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(result, str(lo), (lx, bar_y + bar_h), font, lfs, (0, 0, 0), 3, cv2.LINE_AA)
+    cv2.putText(result, str(lo), (lx, bar_y + bar_h), font, lfs, (255, 255, 255), 1, cv2.LINE_AA)
+
+    return result
 
 
 def jacobs_estimate(sampled_counts, excluded_count, total_cells):
