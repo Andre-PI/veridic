@@ -73,6 +73,78 @@ def _t_critical(df: int) -> float:
     return 1.960
 
 
+def draw_jacobs_heatmap(image_bgr, rows, cols, cell_counts, avg_per_cell, excluded_cells=None):
+    """
+    Density heatmap overlay. cell_counts: {cell_num: int} for counted cells.
+    Counted cells are colored by count (blue→red). Unsampled crowd cells show
+    the estimated avg at very low opacity. Excluded cells get a dark overlay.
+    """
+    excluded_cells = excluded_cells or set()
+    img = image_bgr.copy()
+    h, w = img.shape[:2]
+
+    all_counts = [v for v in cell_counts.values() if v is not None]
+    max_count = max(all_counts) if all_counts else 1
+
+    def _heat_color(count):
+        norm = min(count / max_count, 1.0) if max_count > 0 else 0.0
+        # blue → cyan → green → yellow → red
+        if norm < 0.25:
+            t = norm / 0.25
+            r, g, b = 0, int(t * 255), 255
+        elif norm < 0.5:
+            t = (norm - 0.25) / 0.25
+            r, g, b = 0, 255, int((1 - t) * 255)
+        elif norm < 0.75:
+            t = (norm - 0.5) / 0.25
+            r, g, b = int(t * 255), 255, 0
+        else:
+            t = (norm - 0.75) / 0.25
+            r, g, b = 255, int((1 - t) * 255), 0
+        return (b, g, r)  # BGR
+
+    overlay = img.copy()
+    cell_num = 1
+    for row in range(rows):
+        for col in range(cols):
+            y1, y2 = row * h // rows, (row + 1) * h // rows
+            x1, x2 = col * w // cols, (col + 1) * w // cols
+            if cell_num in excluded_cells:
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), (10, 10, 10), -1)
+                alpha = 0.65
+            elif cell_num in cell_counts:
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), _heat_color(cell_counts[cell_num]), -1)
+                alpha = 0.55
+            else:
+                cv2.rectangle(overlay, (x1, y1), (x2, y2), _heat_color(avg_per_cell), -1)
+                alpha = 0.20
+            roi = img[y1:y2, x1:x2]
+            cv2.addWeighted(overlay[y1:y2, x1:x2], alpha, roi, 1 - alpha, 0, roi)
+            cell_num += 1
+
+    for r in range(rows + 1):
+        cv2.line(img, (0, r * h // rows), (w, r * h // rows), (160, 160, 160), 1, cv2.LINE_AA)
+    for c in range(cols + 1):
+        cv2.line(img, (c * w // cols, 0), (c * w // cols, h), (160, 160, 160), 1, cv2.LINE_AA)
+
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    fs = max(0.28, min(0.55, min(w // cols, h // rows) / 80))
+    cell_num = 1
+    for row in range(rows):
+        for col in range(cols):
+            if cell_num in cell_counts:
+                y1, y2 = row * h // rows, (row + 1) * h // rows
+                x1, x2 = col * w // cols, (col + 1) * w // cols
+                cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
+                label = str(cell_counts[cell_num])
+                (tw, th), _ = cv2.getTextSize(label, font, fs, 1)
+                cv2.rectangle(img, (cx - tw // 2 - 2, cy - th - 2), (cx + tw // 2 + 2, cy + 2), (0, 0, 0), -1)
+                cv2.putText(img, label, (cx - tw // 2, cy), font, fs, (255, 255, 255), 1, cv2.LINE_AA)
+            cell_num += 1
+
+    return img
+
+
 def jacobs_estimate(sampled_counts, excluded_count, total_cells):
     """
     Crowd estimate via Herbert Jacobs grid method.

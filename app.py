@@ -13,7 +13,7 @@ import numpy as np
 import streamlit as st
 import pandas as pd
 
-from jacobs_real import draw_jacobs_grid, jacobs_estimate
+from jacobs_real import draw_jacobs_grid, draw_jacobs_heatmap, jacobs_estimate
 from report import generate_report, generate_jacobs_report
 from processor import (
     DEFAULT_INFERENCE_SIZE,
@@ -858,22 +858,45 @@ with tab2:
                     height=min(520, len(sampled) * 36 + 42),
                 )
 
+            # build counts dict for heatmap (only filled rows)
+            _cell_counts_live = {
+                int(row["Célula"]): int(row["Contagem"])
+                for _, row in edited_counts.iterrows()
+                if pd.notna(row["Contagem"])
+            }
+
             with img_col2:
-                _counted_set = set(
-                    edited_counts[edited_counts["Contagem"].notna()]["Célula"].tolist()
-                )
-                _g2 = draw_jacobs_grid(j2_image, j2_rows, j2_cols, _counted_set, excluded_set)
-                st.image(_g2[:, :, ::-1], channels="RGB", use_container_width=True)
-                render_html(f"""
-                <div style="font-size:0.75rem;color:#93a4bd;margin-top:0.3rem;">
-                    <span class="legend-dot" style="background:#22f06b;"></span>contada &nbsp;
-                    <span class="legend-dot" style="background:#3333cc;"></span>excluída &nbsp;
-                    <span style="color:#f5f8ff;">{len(_counted_set)}/{len(sampled)}</span> preenchidas
-                </div>
-                """)
+                _counted_set = set(_cell_counts_live.keys())
+                if _cell_counts_live:
+                    _avg_live = sum(_cell_counts_live.values()) / len(_cell_counts_live)
+                    _img_display = draw_jacobs_heatmap(
+                        j2_image, j2_rows, j2_cols,
+                        _cell_counts_live, _avg_live, excluded_set,
+                    )
+                    st.image(_img_display[:, :, ::-1], channels="RGB", use_container_width=True)
+                    render_html(f"""
+                    <div style="font-size:0.75rem;color:#93a4bd;margin-top:0.3rem;">
+                        <span class="legend-dot" style="background:#3366ff;"></span>baixa &nbsp;
+                        <span class="legend-dot" style="background:#22c55e;"></span>média &nbsp;
+                        <span class="legend-dot" style="background:#ef4444;"></span>alta &nbsp;
+                        <span class="legend-dot" style="background:#111;border:1px solid #444;"></span>excluída &nbsp;&nbsp;
+                        <span style="color:#f5f8ff;">{len(_counted_set)}/{len(sampled)}</span> preenchidas
+                    </div>
+                    """)
+                else:
+                    _g2 = draw_jacobs_grid(j2_image, j2_rows, j2_cols, set(sampled), excluded_set)
+                    _img_display = _g2
+                    st.image(_g2[:, :, ::-1], channels="RGB", use_container_width=True)
+                    render_html(f"""
+                    <div style="font-size:0.75rem;color:#93a4bd;margin-top:0.3rem;">
+                        <span class="legend-dot" style="background:#22f06b;"></span>a contar &nbsp;
+                        <span class="legend-dot" style="background:#3333cc;"></span>excluída &nbsp;
+                        <span style="color:#f5f8ff;">0/{len(sampled)}</span> preenchidas
+                    </div>
+                    """)
 
             # ── FASE 4: resultado ─────────────────────────────────────────────
-            sampled_counts = [int(x) for x in edited_counts["Contagem"].dropna().tolist()]
+            sampled_counts = list(_cell_counts_live.values())
 
             st.markdown("")
 
@@ -963,12 +986,12 @@ with tab2:
 
                     st.markdown("")
 
-                    # monta dict de contagens para o relatório
-                    _cell_counts = {
-                        int(row["Célula"]): int(row["Contagem"])
-                        for _, row in edited_counts.iterrows()
-                        if pd.notna(row["Contagem"])
-                    }
+                    # heatmap para o PDF
+                    _heatmap_pdf = draw_jacobs_heatmap(
+                        j2_image, j2_rows, j2_cols,
+                        _cell_counts_live, est["avg_per_cell"], excluded_set,
+                    )
+                    _grid_pdf = draw_jacobs_grid(j2_image, j2_rows, j2_cols, set(sampled), excluded_set)
 
                     pdf_bytes = generate_jacobs_report(
                         event_name=j2_event,
@@ -978,7 +1001,7 @@ with tab2:
                         total_cells=total_cells,
                         excluded_cells=sorted(excluded_set),
                         sampled_cells=sampled,
-                        cell_counts=_cell_counts,
+                        cell_counts=_cell_counts_live,
                         estimate=est["estimate"],
                         margin=est["margin"],
                         lower=est["lower"],
@@ -990,7 +1013,8 @@ with tab2:
                         cell_area_m2=cell_area_m2,
                         camera_altitude=float(j2_altitude),
                         camera_fov=float(j2_fov),
-                        grid_image_bgr=_g2,
+                        grid_image_bgr=_grid_pdf,
+                        heatmap_bgr=_heatmap_pdf,
                         ground_w=ground_w,
                         ground_h=ground_h,
                     )

@@ -340,6 +340,7 @@ def generate_jacobs_report(
     grid_image_bgr: np.ndarray,
     ground_w: float,
     ground_h: float,
+    heatmap_bgr: np.ndarray | None = None,
 ) -> bytes:
 
     now = datetime.now().strftime("%d/%m/%Y  %H:%M")
@@ -409,39 +410,86 @@ def generate_jacobs_report(
     pdf.section("Contagem por Celula Sorteada")
     pdf.cells_table(sampled_cells, cell_counts)
 
-    # imagem com grade
+    # imagem com grade + mapa de calor
     if grid_image_bgr is not None:
-        pdf.section("Evidencia Visual — Foto com Grade")
+        pdf.section("Evidencia Visual")
 
-        img_path = _tmp_jpg(grid_image_bgr, quality=88)
-        ratio    = grid_image_bgr.shape[1] / grid_image_bgr.shape[0]
+        ratio = grid_image_bgr.shape[1] / grid_image_bgr.shape[0]
+        has_heatmap = heatmap_bgr is not None
 
-        available_h = 280 - pdf.get_y() - 10
-        img_h = min(available_h, 90)
-        img_w = min(int(img_h * ratio), 170)
-        img_h = int(img_w / ratio)
+        if has_heatmap:
+            # side-by-side: grid left, heatmap right
+            available_h = 280 - pdf.get_y() - 14
+            img_h = min(available_h, 72)
+            max_w = 82
+            img_w = min(int(img_h * ratio), max_w)
+            img_h = int(img_w / ratio)
+            gap = 6
 
-        if img_h < 20:
-            pdf.add_page()
-            img_h = 90
+            if img_h < 20:
+                pdf.add_page()
+                img_h = 72
+                img_w = min(int(img_h * ratio), max_w)
+                img_h = int(img_w / ratio)
+
+            grid_path = _tmp_jpg(grid_image_bgr, quality=88)
+            heat_path = _tmp_jpg(heatmap_bgr, quality=88)
+
+            pdf.set_font("Helvetica", "B", 7)
+            pdf.set_text_color(*_GRAY)
+            pdf.set_x(20)
+            pdf.cell(img_w, 4, "Grade com sorteio", align="C")
+            pdf.set_x(20 + img_w + gap)
+            pdf.cell(img_w, 4, "Mapa de calor — densidade", align="C")
+            pdf.ln(4)
+
+            iy = pdf.get_y()
+            pdf.set_draw_color(*_LGRAY)
+            pdf.rect(20, iy, img_w, img_h)
+            pdf.rect(20 + img_w + gap, iy, img_w, img_h)
+            pdf.image(grid_path, 20, iy, img_w, img_h)
+            pdf.image(heat_path, 20 + img_w + gap, iy, img_w, img_h)
+            pdf.ln(img_h + 4)
+
+            pdf.set_font("Helvetica", "I", 6.5)
+            pdf.set_text_color(*_GRAY)
+            pdf.set_x(20)
+            pdf.cell(
+                170, 4,
+                "Esquerda: celulas sorteadas (verde) e excluidas (azul). "
+                "Direita: mapa de calor — vermelho = alta densidade, azul = baixa, "
+                "tom fraco = celulas nao contadas (media estimada).",
+            )
+
+            Path(grid_path).unlink(missing_ok=True)
+            Path(heat_path).unlink(missing_ok=True)
+        else:
+            available_h = 280 - pdf.get_y() - 10
+            img_h = min(available_h, 90)
             img_w = min(int(img_h * ratio), 170)
             img_h = int(img_w / ratio)
 
-        iy = pdf.get_y()
-        pdf.set_draw_color(*_LGRAY)
-        pdf.rect(20, iy, img_w, img_h)
-        pdf.image(img_path, 20, iy, img_w, img_h)
-        pdf.ln(img_h + 4)
+            if img_h < 20:
+                pdf.add_page()
+                img_h = 90
+                img_w = min(int(img_h * ratio), 170)
+                img_h = int(img_w / ratio)
 
-        pdf.set_font("Helvetica", "I", 6.5)
-        pdf.set_text_color(*_GRAY)
-        pdf.set_x(20)
-        pdf.cell(
-            170, 4,
-            "Verde: celulas contadas. Azul escuro: celulas excluidas. "
-            "Celulas sem cor: nao sorteadas (extrapoladas pela media).",
-        )
+            img_path = _tmp_jpg(grid_image_bgr, quality=88)
+            iy = pdf.get_y()
+            pdf.set_draw_color(*_LGRAY)
+            pdf.rect(20, iy, img_w, img_h)
+            pdf.image(img_path, 20, iy, img_w, img_h)
+            pdf.ln(img_h + 4)
 
-        Path(img_path).unlink(missing_ok=True)
+            pdf.set_font("Helvetica", "I", 6.5)
+            pdf.set_text_color(*_GRAY)
+            pdf.set_x(20)
+            pdf.cell(
+                170, 4,
+                "Verde: celulas contadas. Azul escuro: celulas excluidas. "
+                "Celulas sem cor: nao sorteadas (extrapoladas pela media).",
+            )
+            Path(img_path).unlink(missing_ok=True)
 
     return bytes(pdf.output())
