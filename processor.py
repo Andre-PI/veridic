@@ -1,6 +1,5 @@
 import json
 import subprocess
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -153,6 +152,9 @@ def _gsd(altitude_m, fov_deg, image_width_px):
 
 
 def _classify_density(density_per_m2):
+    if density_per_m2 <= 0:
+        return "vazio", 0.0, "sem público / palco / corredor"
+
     _, label, factor, desc = next(
         row for row in _JACOBS_DENSITY_CLASSES if density_per_m2 < row[0]
     )
@@ -188,7 +190,7 @@ def estimate_crowd_jacobs(density_map, frame_shape, altitude_m, fov_deg,
         total_area_m2 = float(crowd_mask.sum()) * m2_per_pixel
 
     # densidade por setor — usar o density_map original para preservar a soma correta
-    dm_h, dm_w = density_map.shape
+    dm_h, dm_w = dm.shape
     sectors = []
     total_jacobs = 0
     sector_area_m2 = total_area_m2 / (zones_x * zones_y)
@@ -200,16 +202,20 @@ def estimate_crowd_jacobs(density_map, frame_shape, altitude_m, fov_deg,
             x1 = col * dm_w // zones_x
             x2 = (col + 1) * dm_w // zones_x
 
-            csrnet_count = float(density_map[y1:y2, x1:x2].sum())
+            # use the resized density map (dm) so indices match frame projection
+            csrnet_count = float(dm[y1:y2, x1:x2].sum())
             density_per_m2 = csrnet_count / sector_area_m2 if sector_area_m2 > 0 else 0
 
             # densidade manual sobrescreve a automática quando informada pelo observador
             zone_key = (row, col)
             if manual_densities and zone_key in manual_densities:
-                manual_factor = manual_densities[zone_key]
-                label = next(l for _, l, f, _ in _JACOBS_DENSITY_CLASSES if f == manual_factor)
-                _, _, desc = _classify_density(density_per_m2)  # desc still from auto
-                factor = manual_factor
+                manual_factor = float(manual_densities[zone_key])
+                if manual_factor <= 0:
+                    label, factor, desc = "vazio", 0.0, "sem público / palco / corredor"
+                else:
+                    label = next(l for _, l, f, _ in _JACOBS_DENSITY_CLASSES if f == manual_factor)
+                    _, _, desc = _classify_density(density_per_m2)  # desc still from auto
+                    factor = manual_factor
             else:
                 label, factor, desc = _classify_density(density_per_m2)
 
@@ -221,6 +227,7 @@ def estimate_crowd_jacobs(density_map, frame_shape, altitude_m, fov_deg,
                 "csrnet_count": int(round(csrnet_count)),
                 "jacobs_count": zone_jacobs,
                 "density_per_m2": round(density_per_m2, 2),
+                "effective_density_per_m2": round(factor, 2),
                 "density_class": label,
                 "density_factor": factor,
             })
@@ -255,13 +262,60 @@ def count_by_zones(density_map, zones_x, zones_y):
 
 
 def render_density_heatmap(density_map, background_bgr):
-    blurred = cv2.GaussianBlur(density_map, (0, 0), sigmaX=15, sigmaY=15)
-    normalized = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-    # redimensiona heatmap para o tamanho do frame original
+    # resize density map to frame size and apply percentile-based normalization
     h, w = background_bgr.shape[:2]
-    normalized = cv2.resize(normalized, (w, h), interpolation=cv2.INTER_LINEAR)
+    dm = cv2.resize(density_map.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    flat = dm[dm > 0]
+    if flat.size > 0:
+        cap = np.percentile(flat, 99.5)
+        dm = np.clip(dm, 0, cap)
+    # blur with sigma proportional to frame size for smooth visualization
+    sigma = max(h, w) * 0.02
+    ksize = max(1, int(sigma) // 2 * 2 + 1)
+    blurred = cv2.GaussianBlur(dm, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
+    normalized = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
     color_map = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(background_bgr, 0.5, color_map, 0.5, 0)
+    overlay = cv2.addWeighted(background_bgr, 0.6, color_map, 0.4, 0)
+    return overlay
+
+
+def render_jacobs_heatmap(background_bgr, sectors, zones_x, zones_y):
+    if not sectors or zones_x <= 0 or zones_y <= 0:
+        return background_bgr.copy()
+
+    h, w = background_bgr.shape[:2]
+    heat_img = np.zeros((h, w), dtype=np.float32)
+
+    # fill each sector area with the effective density value
+    for sector in sectors:
+        row = int(sector.get("row", 0))
+        col = int(sector.get("col", 0))
+        if 0 <= row < zones_y and 0 <= col < zones_x:
+            val = float(
+                sector.get(
+                    "effective_density_per_m2",
+                    sector.get("density_factor", sector.get("density_per_m2", 0.0)),
+                )
+            )
+            y1 = row * h // zones_y
+            y2 = (row + 1) * h // zones_y
+            x1 = col * w // zones_x
+            x2 = (col + 1) * w // zones_x
+            heat_img[y1:y2, x1:x2] = val
+
+    flat = heat_img[heat_img > 0]
+    if flat.size > 0:
+        cap = np.percentile(flat, 99.5)
+        heat_img = np.clip(heat_img, 0, cap)
+
+    # blur with sigma proportional to frame size for smooth transitions
+    sigma = max(h, w) * 0.02
+    ksize = max(1, int(sigma) // 2 * 2 + 1)
+    blurred = cv2.GaussianBlur(heat_img, (ksize, ksize), sigmaX=sigma, sigmaY=sigma)
+
+    normalized = cv2.normalize(blurred, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+    color_map = cv2.applyColorMap(normalized, cv2.COLORMAP_JET)
+    overlay = cv2.addWeighted(background_bgr, 0.6, color_map, 0.4, 0)
     return overlay
 
 
@@ -340,6 +394,8 @@ def process_image(
     camera_fov=84.0,
     known_area_m2=0.0,
     manual_densities=None,
+    heatmap_mode="csrnet",
+    debug_dir=None,
 ):
     image = cv2.imread(str(image_path))
     if image is None:
@@ -354,11 +410,26 @@ def process_image(
         draw_density_contours(annotated, density_map, percentile=contour_percentile)
     draw_count_overlay(annotated, count, zone_counts=zone_counts if show_zones else None)
 
-    heatmap = render_density_heatmap(density_map, image)
-
     jacobs = estimate_crowd_jacobs(density_map, image.shape, camera_altitude, camera_fov,
                                    known_area_m2, zones_x=zones_x, zones_y=zones_y,
                                    manual_densities=manual_densities)
+
+    if heatmap_mode == "jacobs" and jacobs.get("sectors"):
+        heatmap = render_jacobs_heatmap(image, jacobs["sectors"], zones_x, zones_y)
+    else:
+        heatmap = render_density_heatmap(density_map, image)
+
+    # optional debug outputs: save upscaled density map and overlay for inspection
+    if debug_dir:
+        import os
+        os.makedirs(debug_dir, exist_ok=True)
+        # upscaled raw density map
+        h, w = image.shape[:2]
+        dm_up = cv2.resize(density_map.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+        dm_norm = cv2.normalize(dm_up, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+        cv2.imwrite(os.path.join(debug_dir, "density_upscaled.png"), dm_norm)
+        # overlay
+        cv2.imwrite(os.path.join(debug_dir, "heatmap_overlay.png"), heatmap)
 
     if output_path:
         cv2.imwrite(str(output_path), annotated)
@@ -392,6 +463,7 @@ def process_video(
     camera_fov=84.0,
     known_area_m2=0.0,
     manual_densities=None,
+    heatmap_mode="csrnet",
     progress_callback=None,
     preview_callback=None,
 ):
@@ -463,8 +535,22 @@ def process_video(
             out.release()
 
     if heatmap_accum is not None and heatmap_path and last_annotated is not None:
-        background = last_annotated
-        heatmap_final = render_density_heatmap(heatmap_accum, last_annotated)
+        if heatmap_mode == "jacobs" and last_density_map is not None:
+            jacobs_preview = estimate_crowd_jacobs(
+                last_density_map,
+                last_annotated.shape,
+                camera_altitude,
+                camera_fov,
+                known_area_m2,
+                zones_x=zones_x,
+                zones_y=zones_y,
+                manual_densities=manual_densities,
+            )
+            heatmap_final = render_jacobs_heatmap(
+                last_annotated, jacobs_preview.get("sectors", []), zones_x, zones_y
+            )
+        else:
+            heatmap_final = render_density_heatmap(heatmap_accum, last_annotated)
         cv2.imwrite(str(heatmap_path), heatmap_final)
 
     peak = max((e["count"] for e in counts_timeline), default=0)

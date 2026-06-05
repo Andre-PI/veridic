@@ -108,6 +108,7 @@ def render_tab_csrnet(config):
                 camera_fov=float(config["camera_fov"]),
                 known_area_m2=float(config["known_area"]),
                 manual_densities=config["manual_densities"],
+                heatmap_mode="jacobs" if config.get("heatmap_mode") == "Jacobs por setor" else "csrnet",
                 progress_callback=on_progress,
                 preview_callback=on_preview,
             )
@@ -214,6 +215,7 @@ def render_tab_csrnet(config):
                     camera_fov=float(config["camera_fov"]),
                     known_area_m2=float(config["known_area"]),
                     manual_densities=config["manual_densities"],
+                    heatmap_mode="jacobs" if config.get("heatmap_mode") == "Jacobs por setor" else "csrnet",
                 )
 
             with left_view.container():
