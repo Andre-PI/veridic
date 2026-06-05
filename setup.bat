@@ -45,4 +45,4 @@ echo   streamlit run app.py
 echo.
 
 set /p resp="Iniciar agora? (s/n): "
-if /i "%resp%"=="s" streamlit run app.py
+if /i "%resp%"=="s" venv\Scripts\streamlit run app.py
